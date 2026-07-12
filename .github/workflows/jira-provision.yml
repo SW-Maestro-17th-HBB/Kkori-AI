@@ -1,0 +1,35 @@
+name: Jira Story → Issues + Branch
+
+on:
+  repository_dispatch:
+    types: [jira-story]
+
+concurrency:
+  group: jira-story-${{ github.event.client_payload.jiraKey }}
+  cancel-in-progress: false
+
+permissions:
+  issues: write      # Issue / sub-issue 생성
+  contents: write    # 브랜치 생성
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Provision issues and branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_OWNER: ${{ github.repository_owner }}
+          GH_REPO: ${{ github.event.repository.name }}
+          DEFAULT_BASE_BRANCH: "develop"
+          BRANCH_PREFIX: "feature"
+          CLIENT_PAYLOAD: ${{ toJSON(github.event.client_payload) }}
+        run: node .github/scripts/provision.mjs
