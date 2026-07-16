@@ -249,6 +249,9 @@ at-least-once + XAUTOCLAIM 회수는 **실제로 죽지 않은 원본과 회수�
 - **스키마 소유권**: `resume_chunks` 테이블(`content`, `metadata`, `embedding vector(1024)`) + `CREATE EXTENSION vector`는
   **Worker가 소유**(유일 writer이자 임베딩 차원의 주인). 차원 1024는 Cohere v3 확정에 종속 — 모델 교체 시 여기만 조정.
   백엔드는 `resumes`/`structured_data` 소유. 기동 시 멱등 DDL(`IF NOT EXISTS`).
+- **시각 컬럼은 UTC-aware로 기록**: 백엔드 소유 `resume_analysis_status`의 `started_at`/`completed_at`/`failed_at`은
+  **`timestamptz`(UTC)**다(백엔드 HBB1-232 확정). 워커는 타임존 포함 UTC(aware datetime, 예: `datetime.now(timezone.utc)`)로
+  기록한다 — naive datetime 금지.
 
 ---
 
@@ -285,3 +288,6 @@ at-least-once + XAUTOCLAIM 회수는 **실제로 죽지 않은 원본과 회수�
   `chunk_version` metadata로 향후 교체 시 REINDEX 백필. 근거·대안 비교 → §2.5 및 drafts 노트.
 - 2026-07-16 이미지-only(스캔) PDF: OCR **추후 지원**. 현재는 **빈 텍스트 추출 → `FAILED`**로 명확히 실패 처리
   ("0청크 EMBEDDED"와의 혼동 방지). → §2.1, §10.
+- 2026-07-16 백엔드 HBB1-232 확정 전달: (1) REINDEX 진입 상태 세팅 `ResumeAnalysisStatus.restartFor` 구현·PR#44 머지 예정,
+  (2) AI 모델 = Haiku 4.5 + Cohere v3(둘 다 기반영), (3) 백엔드 `StructuredData` 경로 `dto/`→`domain/`(내용 동일, 워커 무영향),
+  (4) `resume_analysis_status` 시각 컬럼 `timestamp`→**`timestamptz`(UTC)** → 워커는 UTC-aware로 기록. → §8.
