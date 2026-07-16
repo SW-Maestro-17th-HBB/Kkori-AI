@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     s3_endpoint_url: str = "http://localhost:9000"
     s3_region: str = "ap-northeast-2"
 
+    # --- AI 제공자 선택 (§8) ---
+    # "fake" = 가짜(로컬/테스트, 클라우드 없이) / "bedrock" = 실제(클라우드 준비 후)
+    ai_provider: str = "fake"
+
     # --- AWS Bedrock (LLM·임베딩) ---
     # 서울 리전 모델 가용성 제한 가능 → 기본 us-east-1 (§8).
     bedrock_region: str = "us-east-1"
