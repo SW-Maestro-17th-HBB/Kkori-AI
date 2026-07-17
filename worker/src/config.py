@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     # 로컬은 MinIO 엔드포인트, 실서버는 빈값으로 두면 boto3 기본 동작(실제 S3 + IAM Role).
     s3_endpoint_url: str = "http://localhost:9000"
     s3_region: str = "ap-northeast-2"
+    # 자격증명 — 빈값이면 boto3 기본 체인(IAM Role·환경변수·~/.aws)에 맡긴다.
+    # 로컬 MinIO 는 .env 로 주입 (docker-compose 기본: kkori / kkori1234).
+    s3_access_key: str = ""
+    s3_secret_key: str = ""
 
     # --- AI 제공자 선택 (§8) ---
     # "fake" = 가짜(로컬/테스트, 클라우드 없이) / "bedrock" = 실제(클라우드 준비 후)
