@@ -1,22 +1,22 @@
 """분석 파이프라인 — 진입 라우팅(§3.1)과 단계 실행.
 
 진입은 **DB 상태가 결정**하고(§2.3), mode 는 cross-check 로만 쓴다.
-모든 의존(커넥션·임베딩기·상태발행)은 인자로 받아 테스트에서 갈아끼울 수 있게 한다.
+모든 의존(커넥션·임베딩기·추출·구조화·상태발행)은 인자로 받아 테스트에서 갈아끼울 수 있다.
 
-현재 구현 범위:
-- EMBEDDED / FAILED / 레코드 없음(유령) → 스킵 (이벤트 재발행 없음, §3.1)
-- EMBEDDING / PARSED → 임베딩 단계 (REINDEX 와 재개가 여기로) — **완성**
-- 이른 상태(UPLOADED~STRUCTURING) → FULL 처음부터 — 추출·구조화 미구현(TODO), 단
-  mode=REINDEX 가 이 상태로 오면 계약 위반 → FAILED (§2.3)
+라우팅(§3.1 재개 표):
+- EMBEDDED / FAILED / 레코드 없음(유령) → 스킵 (이벤트 재발행 없음)
+- EMBEDDING / PARSED → 임베딩 단계 (REINDEX 진입·재개)
+- 이른 상태(UPLOADED~STRUCTURING) → FULL 처음부터 (원문 미저장이므로 추출부터).
+  단 mode=REINDEX 가 이 상태로 오면 계약 위반 → FAILED (§2.3)
 """
 
 from __future__ import annotations
 
-from typing import Awaitable, Callable, Protocol
+from typing import Awaitable, Callable
 
 from psycopg import AsyncConnection
 
-from src.ai import Embedder
+from src.ai import Embedder, Structurer
 from src.chunking import chunk_structured_data
 from src.config import Settings
 from src.contract import AnalysisMode, AnalysisStatus, ParseRequest
@@ -25,11 +25,15 @@ from src.db import (
     load_structured_data,
     mark_failed,
     replace_chunks,
+    save_structured_data,
     try_transition,
 )
+from src.extraction import is_empty_text
 
 # 상태 발행 콜백: (resume_id, user_id, status, message)
 PublishStatus = Callable[[int, int, AnalysisStatus, str], Awaitable[None]]
+# 텍스트 획득 콜백: (bucket, objectKey) → 추출된 텍스트 (S3 다운로드 + PyMuPDF 를 감싼다)
+FetchText = Callable[[str, str], Awaitable[str]]
 
 _EARLY_STATES = {
     AnalysisStatus.UPLOADED.value,
@@ -48,6 +52,8 @@ async def process_request(
     *,
     conn: AsyncConnection,
     embedder: Embedder,
+    structurer: Structurer,
+    fetch_text: FetchText,
     publish: PublishStatus,
     settings: Settings,
 ) -> None:
@@ -77,8 +83,68 @@ async def process_request(
             await publish(request.resumeId, request.userId, AnalysisStatus.FAILED, msg)
         return
 
-    # FULL 처음부터 — 텍스트 추출·구조화 단계에서 구현 (§2.1)
-    raise NotImplementedError("FULL 파이프라인(추출→구조화)은 다음 단계에서 구현")
+    # FULL — 처음부터 (§2.1). 크래시 재개(PARSING~STRUCTURING)도 원문 미저장이라 처음부터(§3.1).
+    await _run_full_pipeline(
+        request, entry_status=status, conn=conn, embedder=embedder,
+        structurer=structurer, fetch_text=fetch_text, publish=publish, settings=settings,
+    )
+
+
+async def _run_full_pipeline(
+    request: ParseRequest,
+    *,
+    entry_status: str,
+    conn: AsyncConnection,
+    embedder: Embedder,
+    structurer: Structurer,
+    fetch_text: FetchText,
+    publish: PublishStatus,
+    settings: Settings,
+) -> None:
+    """FULL: 추출 → 구조화 → PARSED → 임베딩 단계 합류 (§2.1 단계표).
+
+    각 단계 진입은 CAS — 0행이면 다른 처리자가 앞서간 것이므로 양보(§3.3).
+    추출·구조화의 예외(다운로드 실패·손상 PDF·LLM 오류)는 전파 → PEL 잔류 → 재시도.
+    """
+    rid, uid = request.resumeId, request.userId
+    entry = AnalysisStatus(entry_status)
+
+    # 1단계: PARSING 진입 (started_at 기록은 db 계층이 담당)
+    if not await try_transition(conn, rid, entry, AnalysisStatus.PARSING):
+        return
+    await publish(rid, uid, AnalysisStatus.PARSING, "")
+
+    # 2단계: 텍스트 추출 (원문은 저장하지 않는다 — 변수로만 흐름)
+    if not await try_transition(conn, rid, AnalysisStatus.PARSING, AnalysisStatus.TEXT_EXTRACTING):
+        return
+    await publish(rid, uid, AnalysisStatus.TEXT_EXTRACTING, "")
+    text = await fetch_text(request.bucket, request.objectKey)
+    if is_empty_text(text):
+        # 이미지-only(스캔) PDF — "0청크 EMBEDDED"와 구분해 명확히 실패 처리 (§2.1)
+        msg = "텍스트 추출 실패(이미지-only PDF 가능성, OCR 미지원)"
+        if await mark_failed(conn, rid, msg):
+            await publish(rid, uid, AnalysisStatus.FAILED, msg)
+        return
+
+    # 3단계: LLM 구조화 → 산출물 저장과 PARSED 전이를 한 트랜잭션으로 (§2.4 불변식 1)
+    if not await try_transition(conn, rid, AnalysisStatus.TEXT_EXTRACTING, AnalysisStatus.STRUCTURING):
+        return
+    await publish(rid, uid, AnalysisStatus.STRUCTURING, "")
+    data = structurer.structure(text)
+    try:
+        async with conn.transaction():
+            await save_structured_data(conn, rid, data)
+            if not await try_transition(conn, rid, AnalysisStatus.STRUCTURING, AnalysisStatus.PARSED):
+                raise _Yield()
+    except _Yield:
+        return
+    await publish(rid, uid, AnalysisStatus.PARSED, "")
+
+    # 4~5단계: 임베딩 (PARSED 에서 합류 — REINDEX 와 같은 경로)
+    await _run_embedding_stage(
+        request, entry_status=AnalysisStatus.PARSED.value, conn=conn,
+        embedder=embedder, publish=publish, settings=settings,
+    )
 
 
 async def _run_embedding_stage(

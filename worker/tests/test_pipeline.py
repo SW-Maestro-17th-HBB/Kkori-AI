@@ -1,12 +1,13 @@
-"""파이프라인 라우팅·임베딩 단계 테스트 (§2, §3.1) — 실제 DB + 가짜 임베딩."""
+"""파이프라인 라우팅·단계 테스트 (§2, §3.1) — 실제 DB + 가짜 AI/추출."""
 
 import pytest
 
-from src.ai import FakeEmbedder
+from src.ai import FakeEmbedder, FakeStructurer
 from src.config import Settings
 from src.contract import AnalysisMode, AnalysisStatus, ParseRequest
-from src.db import count_chunks, get_parse_status
+from src.db import count_chunks, get_parse_status, load_structured_data
 from src.pipeline import process_request
+from src.structured_data import StructuredData
 from tests.conftest import DIM, requires_postgres, seed_resume
 
 pytestmark = requires_postgres
@@ -38,12 +39,21 @@ def _request(rid: int, mode: AnalysisMode = AnalysisMode.REINDEX) -> ParseReques
     return ParseRequest(resumeId=rid, userId=1, bucket="b", objectKey="k", mode=mode)
 
 
-async def _run(conn, rid, mode=AnalysisMode.REINDEX) -> Recorder:
+def _fetch_text(text: str = "이력서 원문 텍스트"):
+    async def fetch(bucket: str, key: str) -> str:
+        return text
+
+    return fetch
+
+
+async def _run(conn, rid, mode=AnalysisMode.REINDEX, *, text="이력서 원문 텍스트") -> Recorder:
     rec = Recorder()
     await process_request(
         _request(rid, mode),
         conn=conn,
         embedder=FakeEmbedder(dim=DIM),
+        structurer=FakeStructurer(StructuredData.model_validate(SD)),
+        fetch_text=_fetch_text(text),
         publish=rec,
         settings=Settings(embedding_dim=DIM),
     )
@@ -81,8 +91,9 @@ async def test_레코드없는_유령메시지_스킵(conn):
     rec = Recorder()
     await process_request(
         _request(999999),
-        conn=conn, embedder=FakeEmbedder(dim=DIM), publish=rec,
-        settings=Settings(embedding_dim=DIM),
+        conn=conn, embedder=FakeEmbedder(dim=DIM),
+        structurer=FakeStructurer(), fetch_text=_fetch_text(),
+        publish=rec, settings=Settings(embedding_dim=DIM),
     )
     assert rec.events == []
 
@@ -105,10 +116,58 @@ async def test_REINDEX인데_이른상태면_계약위반_FAILED(conn):
 
 
 @pytest.mark.asyncio
-async def test_FULL_이른상태는_아직_미구현(conn):
+async def test_FULL_행복경로_UPLOADED에서_EMBEDDED까지(conn):
     rid = await seed_resume(conn, AnalysisStatus.UPLOADED, None)
-    with pytest.raises(NotImplementedError):
-        await _run(conn, rid, mode=AnalysisMode.FULL)
+    rec = await _run(conn, rid, mode=AnalysisMode.FULL)
+    assert await get_parse_status(conn, rid) == "EMBEDDED"
+    # 구조화 결과가 저장됐고 (§2.4), 청크도 생성됨
+    data = await load_structured_data(conn, rid)
+    assert data is not None and data.profile.name == "홍길동"
+    assert await count_chunks(conn, rid) == 3
+    # 단계 이벤트 전부 순서대로 (§1.3)
+    assert rec.statuses() == [
+        "PARSING", "TEXT_EXTRACTING", "STRUCTURING", "PARSED", "EMBEDDING", "EMBEDDED",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_FULL_빈추출이면_FAILED(conn):
+    """이미지-only(스캔) PDF — 빈 텍스트 → 구조화로 가지 않고 FAILED (§2.1)."""
+    rid = await seed_resume(conn, AnalysisStatus.UPLOADED, None)
+    rec = await _run(conn, rid, mode=AnalysisMode.FULL, text="   \n  ")
+    assert await get_parse_status(conn, rid) == "FAILED"
+    assert rec.statuses() == ["PARSING", "TEXT_EXTRACTING", "FAILED"]
+    assert "OCR 미지원" in rec.events[-1][3]
+    assert await load_structured_data(conn, rid) is None  # 구조화 안 함
+
+
+@pytest.mark.asyncio
+async def test_FULL_중간상태_크래시재개는_처음부터(conn):
+    """원문 미저장이라 PARSING~STRUCTURING 재개도 처음부터 (§3.1)."""
+    rid = await seed_resume(conn, AnalysisStatus.TEXT_EXTRACTING, None)
+    rec = await _run(conn, rid, mode=AnalysisMode.FULL)
+    assert await get_parse_status(conn, rid) == "EMBEDDED"
+    assert rec.statuses()[0] == "PARSING"  # 처음부터 다시
+
+
+@pytest.mark.asyncio
+async def test_FULL_추출예외는_전파되어_PEL잔류(conn):
+    """다운로드 실패·손상 PDF → 예외 전파 = ACK 안 됨 → 재시도 대상."""
+    rid = await seed_resume(conn, AnalysisStatus.UPLOADED, None)
+
+    async def broken_fetch(bucket: str, key: str) -> str:
+        raise ConnectionError("S3 다운로드 실패")
+
+    rec = Recorder()
+    with pytest.raises(ConnectionError):
+        await process_request(
+            _request(rid, AnalysisMode.FULL),
+            conn=conn, embedder=FakeEmbedder(dim=DIM),
+            structurer=FakeStructurer(), fetch_text=broken_fetch,
+            publish=rec, settings=Settings(embedding_dim=DIM),
+        )
+    # 상태는 TEXT_EXTRACTING 에 남음 → 재전달 시 §3.1 표대로 처음부터
+    assert await get_parse_status(conn, rid) == "TEXT_EXTRACTING"
 
 
 @pytest.mark.asyncio

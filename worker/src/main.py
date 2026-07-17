@@ -19,10 +19,11 @@ from redis.asyncio import Redis
 from faststream import FastStream
 from faststream.redis import RedisBroker, StreamSub
 
-from src.ai import Embedder, build_embedder
+from src.ai import Embedder, Structurer, build_embedder, build_structurer
 from src.config import Settings, get_settings
 from src.contract import AnalysisStatus, ParseRequest, StatusChanged
 from src.db import connect, ensure_schema
+from src.extraction import build_s3_client, download_pdf, extract_text
 from src.pipeline import process_request
 
 settings: Settings = get_settings()
@@ -31,10 +32,23 @@ app = FastStream(broker)
 
 
 class _Resources:
-    """기동 시 준비되는 공유 자원 (DB 커넥션·임베딩기)."""
+    """기동 시 준비되는 공유 자원 (DB 커넥션·AI 제공자·S3)."""
 
     db = None  # psycopg AsyncConnection
     embedder: Embedder | None = None
+    structurer: Structurer | None = None
+    s3 = None  # boto3 client
+
+
+async def fetch_text(bucket: str, object_key: str) -> str:
+    """S3 다운로드 + PyMuPDF 추출. blocking 호출이라 스레드로 넘긴다."""
+    import asyncio
+
+    def _work() -> str:
+        pdf = download_pdf(_Resources.s3, bucket, object_key)
+        return extract_text(pdf)
+
+    return await asyncio.to_thread(_work)
 
 
 @app.on_startup
@@ -42,6 +56,8 @@ async def startup() -> None:
     _Resources.db = await connect(settings)
     await ensure_schema(_Resources.db, dim=settings.embedding_dim)
     _Resources.embedder = build_embedder(settings)
+    _Resources.structurer = build_structurer(settings)
+    _Resources.s3 = build_s3_client(settings)
 
 
 @app.on_shutdown
@@ -82,7 +98,6 @@ async def handle_parse_requested(request: ParseRequest) -> None:
     정상 반환 = ACK(종결·스킵·양보), 예외 = PEL 잔류 → 회수 대상.
     TODO(§4): 수신 직후 delivery count 확인 → 임계 초과 시 FAILED 후 ACK.
     TODO(§3): XAUTOCLAIM 회수 루프.
-    TODO(§2.1): FULL 파이프라인(추출→구조화) — pipeline.process_request 안에서 채운다.
     """
 
     async def publish(rid: int, uid: int, status: AnalysisStatus, message: str) -> None:
@@ -92,6 +107,8 @@ async def handle_parse_requested(request: ParseRequest) -> None:
         request,
         conn=_Resources.db,
         embedder=_Resources.embedder,
+        structurer=_Resources.structurer,
+        fetch_text=fetch_text,
         publish=publish,
         settings=settings,
     )
