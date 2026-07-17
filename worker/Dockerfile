@@ -9,4 +9,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY shared/ shared/
 COPY worker/src/ src/
 
-CMD ["python", "-m", "src.main"]
+CMD ["faststream", "run", "src.main:app"]
