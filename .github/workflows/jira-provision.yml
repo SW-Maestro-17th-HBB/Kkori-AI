@@ -1,35 +1,53 @@
-name: Jira Story → Issues + Branch
+name: Jira Story → Issues (Jira API)
+
+# Jira Automation 이 이 repository 로 dispatch:
+#   POST /repos/<OWNER>/<REPO>/dispatches
+#   body: { "event_type": "jira-story", "client_payload": { "jiraKey": "HBB1-42" } }
+#
+# 수동 테스트: Actions 탭 → 이 워크플로 → Run workflow 에서 jiraKey 입력
 
 on:
   repository_dispatch:
     types: [jira-story]
+  workflow_dispatch:
+    inputs:
+      jiraKey:
+        description: "Jira Story 키 (예: HBB1-42)"
+        required: true
+        type: string
 
 concurrency:
-  group: jira-story-${{ github.event.client_payload.jiraKey }}
+  group: jira-story-${{ github.event.client_payload.jiraKey || inputs.jiraKey }}
   cancel-in-progress: false
 
+# permissions 를 명시하면 나머지는 전부 none 이 됨 — checkout 에 contents: read 필수
 permissions:
-  issues: write      # Issue / sub-issue 생성
-  contents: write    # 브랜치 생성
+  contents: read
+  issues: write
 
 jobs:
   provision:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "22"
+          # 의존성 설치가 없는 스크립트 — pnpm 미설치 상태라 캐시 자동감지를 꺼야 함
+          package-manager-cache: false
 
-      - name: Provision issues and branch
+      - name: Provision issues from Jira
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_OWNER: ${{ github.repository_owner }}
           GH_REPO: ${{ github.event.repository.name }}
-          DEFAULT_BASE_BRANCH: "develop"
-          BRANCH_PREFIX: "feature"
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          TARGET_LABEL: "Kkori-AI"
           CLIENT_PAYLOAD: ${{ toJSON(github.event.client_payload) }}
+          INPUT_JIRA_KEY: ${{ inputs.jiraKey }}
         run: node .github/scripts/provision.mjs
