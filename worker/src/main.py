@@ -19,12 +19,35 @@ from redis.asyncio import Redis
 from faststream import FastStream
 from faststream.redis import RedisBroker, StreamSub
 
+from src.ai import Embedder, build_embedder
 from src.config import Settings, get_settings
 from src.contract import AnalysisStatus, ParseRequest, StatusChanged
+from src.db import connect, ensure_schema
+from src.pipeline import process_request
 
 settings: Settings = get_settings()
 broker = RedisBroker(settings.redis_url)
 app = FastStream(broker)
+
+
+class _Resources:
+    """기동 시 준비되는 공유 자원 (DB 커넥션·임베딩기)."""
+
+    db = None  # psycopg AsyncConnection
+    embedder: Embedder | None = None
+
+
+@app.on_startup
+async def startup() -> None:
+    _Resources.db = await connect(settings)
+    await ensure_schema(_Resources.db, dim=settings.embedding_dim)
+    _Resources.embedder = build_embedder(settings)
+
+
+@app.on_shutdown
+async def shutdown() -> None:
+    if _Resources.db is not None:
+        await _Resources.db.close()
 
 
 async def publish_status(
@@ -54,17 +77,21 @@ async def publish_status(
     )
 )
 async def handle_parse_requested(request: ParseRequest) -> None:
-    """분석 요청 처리 진입점 — 아직 뼈대.
+    """분석 요청 처리 진입점.
 
+    정상 반환 = ACK(종결·스킵·양보), 예외 = PEL 잔류 → 회수 대상.
     TODO(§4): 수신 직후 delivery count 확인 → 임계 초과 시 FAILED 후 ACK.
-    TODO(§3.1): DB 상태로 재개 지점 결정(원자적 상태 CAS).
-    TODO(§2): 파이프라인 단계(추출→구조화→청킹→임베딩→색인) 실행.
-
-    현재는 수신·발행 경로 확인용으로 `PARSING` 만 발행한다(자리표시자).
+    TODO(§3): XAUTOCLAIM 회수 루프.
+    TODO(§2.1): FULL 파이프라인(추출→구조화) — pipeline.process_request 안에서 채운다.
     """
-    await publish_status(
-        broker._connection,
-        request.resumeId,
-        request.userId,
-        AnalysisStatus.PARSING,
+
+    async def publish(rid: int, uid: int, status: AnalysisStatus, message: str) -> None:
+        await publish_status(broker._connection, rid, uid, status, message)
+
+    await process_request(
+        request,
+        conn=_Resources.db,
+        embedder=_Resources.embedder,
+        publish=publish,
+        settings=settings,
     )
