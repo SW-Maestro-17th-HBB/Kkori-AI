@@ -187,3 +187,44 @@ async def test_재실행해도_멱등_청크중복없음(conn):
     rec2 = await _run(conn, rid)  # 중복 전달
     assert await count_chunks(conn, rid) == 3  # 그대로
     assert rec2.events == []  # 스킵, 재발행 없음
+
+
+async def _run_with_delivery(conn, rid, delivery_count, mode=AnalysisMode.FULL) -> Recorder:
+    rec = Recorder()
+    await process_request(
+        _request(rid, mode),
+        conn=conn, embedder=FakeEmbedder(dim=DIM),
+        structurer=FakeStructurer(StructuredData.model_validate(SD)),
+        fetch_text=_fetch_text(), publish=rec,
+        settings=Settings(embedding_dim=DIM),  # delivery_count_threshold 기본 3
+        delivery_count=delivery_count,
+    )
+    return rec
+
+
+@pytest.mark.asyncio
+async def test_포기규칙_임계이상이면_재처리없이_FAILED(conn):
+    """§4: delivery count 임계(3) 이상 → 처리 없이 FAILED 기록 후 반환(=ACK)."""
+    rid = await seed_resume(conn, AnalysisStatus.UPLOADED, None)
+    rec = await _run_with_delivery(conn, rid, delivery_count=3)
+    assert await get_parse_status(conn, rid) == "FAILED"
+    assert rec.statuses() == ["FAILED"]  # 파이프라인 단계 이벤트 없음 = 재처리 안 함
+    assert "재전달 임계 초과" in rec.events[-1][3]
+    assert await count_chunks(conn, rid) == 0
+
+
+@pytest.mark.asyncio
+async def test_포기규칙_임계미만은_정상처리(conn):
+    rid = await seed_resume(conn, AnalysisStatus.UPLOADED, None)
+    rec = await _run_with_delivery(conn, rid, delivery_count=2)
+    assert await get_parse_status(conn, rid) == "EMBEDDED"
+    assert rec.statuses()[0] == "PARSING"  # 정상 파이프라인 진행
+
+
+@pytest.mark.asyncio
+async def test_포기규칙_이미_EMBEDDED면_덮지않음(conn):
+    """완료 직후 ACK 만 못 한 메시지가 임계로 회수된 경우 — 완료를 실패로 오염시키지 않는다."""
+    rid = await seed_resume(conn, AnalysisStatus.EMBEDDED, SD)
+    rec = await _run_with_delivery(conn, rid, delivery_count=5)
+    assert await get_parse_status(conn, rid) == "EMBEDDED"  # 보호됨
+    assert rec.events == []  # 이벤트 재발행 없음

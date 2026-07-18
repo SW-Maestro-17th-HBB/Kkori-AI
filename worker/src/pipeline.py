@@ -56,8 +56,19 @@ async def process_request(
     fetch_text: FetchText,
     publish: PublishStatus,
     settings: Settings,
+    delivery_count: int = 1,
 ) -> None:
     """요청 1건 처리. 정상 반환 = ACK(종결/스킵/양보), 예외 = PEL 잔류(재시도 대상)."""
+
+    # 포기 규칙 (§4): 처리 시작 전에 재전달 횟수 확인. 임계 이상이면 재처리 없이
+    # ① FAILED 기록 → ② 정상 반환(=XACK). 이 순서 고정 — 중간에 죽어도 재전달본이
+    # 같은 경로로 수렴한다(mark_failed 는 멱등, 종결 상태는 덮지 않음).
+    if delivery_count >= settings.delivery_count_threshold:
+        msg = f"재전달 임계 초과(delivery count={delivery_count})"
+        if await mark_failed(conn, request.resumeId, msg):
+            await publish(request.resumeId, request.userId, AnalysisStatus.FAILED, msg)
+        return
+
     status = await get_parse_status(conn, request.resumeId)
 
     # 레코드 없음 = 발행 후 커밋 실패한 유령 메시지 → 스킵 (백엔드 걸어둔 방어)

@@ -17,7 +17,7 @@ from __future__ import annotations
 from redis.asyncio import Redis
 
 from faststream import FastStream
-from faststream.redis import RedisBroker, StreamSub
+from faststream.redis import RedisBroker, RedisStreamMessage, StreamSub
 
 from src.ai import Embedder, Structurer, build_embedder, build_structurer
 from src.config import Settings, get_settings
@@ -66,6 +66,21 @@ async def shutdown() -> None:
         await _Resources.db.close()
 
 
+async def get_delivery_count(redis: Redis, message_id: str) -> int:
+    """이 메시지가 몇 번째 전달인지 (Redis PEL 의 times_delivered).
+
+    포기 규칙(§4)의 판단 근거. PEL 에서 못 찾으면(이미 ACK 등) 1로 간주한다.
+    """
+    entries = await redis.xpending_range(
+        ParseRequest.STREAM_KEY,
+        settings.consumer_group,
+        min=message_id,
+        max=message_id,
+        count=1,
+    )
+    return entries[0]["times_delivered"] if entries else 1
+
+
 async def publish_status(
     redis: Redis,
     resume_id: int,
@@ -92,16 +107,21 @@ async def publish_status(
         # 되어 갓 들어온 메시지를 못 읽는다(실측 확인). 회수(XAUTOCLAIM, §3)는 별도로 구현한다. TODO(§3).
     )
 )
-async def handle_parse_requested(request: ParseRequest) -> None:
+async def handle_parse_requested(request: ParseRequest, msg: RedisStreamMessage) -> None:
     """분석 요청 처리 진입점.
 
-    정상 반환 = ACK(종결·스킵·양보), 예외 = PEL 잔류 → 회수 대상.
-    TODO(§4): 수신 직후 delivery count 확인 → 임계 초과 시 FAILED 후 ACK.
+    정상 반환 = ACK(종결·스킵·양보·포기), 예외 = PEL 잔류 → 회수 대상.
     TODO(§3): XAUTOCLAIM 회수 루프.
     """
 
     async def publish(rid: int, uid: int, status: AnalysisStatus, message: str) -> None:
         await publish_status(broker._connection, rid, uid, status, message)
+
+    # 포기 규칙(§4) 판단 근거 — 이 메시지의 전달 횟수 (message id 없으면 1로 간주)
+    message_ids = msg.raw_message.get("message_ids") or []
+    delivery_count = (
+        await get_delivery_count(broker._connection, message_ids[0]) if message_ids else 1
+    )
 
     await process_request(
         request,
@@ -111,4 +131,5 @@ async def handle_parse_requested(request: ParseRequest) -> None:
         fetch_text=fetch_text,
         publish=publish,
         settings=settings,
+        delivery_count=delivery_count,
     )
