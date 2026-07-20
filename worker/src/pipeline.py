@@ -12,7 +12,8 @@
 
 from __future__ import annotations
 
-from typing import Awaitable, Callable
+import asyncio
+from typing import Awaitable, Callable, TypeVar
 
 from psycopg import AsyncConnection
 
@@ -22,13 +23,17 @@ from src.config import Settings
 from src.contract import AnalysisMode, AnalysisStatus, ParseRequest
 from src.db import (
     get_parse_status,
+    increment_retry_count,
     load_structured_data,
     mark_failed,
     replace_chunks,
+    reset_retry_count,
     save_structured_data,
     try_transition,
 )
 from src.extraction import is_empty_text
+
+T = TypeVar("T")
 
 # 상태 발행 콜백: (resume_id, user_id, status, message)
 PublishStatus = Callable[[int, int, AnalysisStatus, str], Awaitable[None]]
@@ -47,6 +52,30 @@ class _Yield(Exception):
     """다른 처리자가 앞서감 — 트랜잭션 롤백 후 조용히 물러나기 위한 내부 신호."""
 
 
+async def _with_retry(
+    thunk: Callable[[], Awaitable[T]],
+    *,
+    conn: AsyncConnection,
+    resume_id: int,
+    settings: Settings,
+) -> T:
+    """외부 호출(S3·LLM·임베딩)의 일시 오류 내부 재시도 (§9).
+
+    실패할 때마다 retry_count 를 DB 에 즉시 +1 하고(§6 — 크래시 생존성·관측성),
+    지수 백오프(1s→2s→4s) 후 재시도한다. 최대 시도를 소진하면 마지막 예외를 전파한다
+    → 핸들러/회수 경로에서 ACK 없이 끝나 PEL 재전달로 이어진다.
+    """
+    for attempt in range(settings.retry_max_attempts):
+        try:
+            return await thunk()
+        except Exception:
+            await increment_retry_count(conn, resume_id)
+            if attempt + 1 >= settings.retry_max_attempts:
+                raise
+            await asyncio.sleep(settings.retry_base_delay_s * (2**attempt))
+    raise AssertionError("unreachable")  # for 문은 반드시 return 또는 raise 로 끝난다
+
+
 async def process_request(
     request: ParseRequest,
     *,
@@ -57,8 +86,13 @@ async def process_request(
     publish: PublishStatus,
     settings: Settings,
     delivery_count: int = 1,
+    is_reclaimed: bool = False,
 ) -> None:
-    """요청 1건 처리. 정상 반환 = ACK(종결/스킵/양보), 예외 = PEL 잔류(재시도 대상)."""
+    """요청 1건 처리. 정상 반환 = ACK(종결/스킵/양보), 예외 = PEL 잔류(재시도 대상).
+
+    is_reclaimed: 회수(XAUTOCLAIM) 경로 여부. 신규 메시지는 새 런이라 retry_count 를 0으로
+    리셋하지만, 회수 재개는 같은 런의 연장이라 리셋하지 않는다 (§3.2, §6).
+    """
 
     # 포기 규칙 (§4): 처리 시작 전에 재전달 횟수 확인. 임계 이상이면 재처리 없이
     # ① FAILED 기록 → ② 정상 반환(=XACK). 이 순서 고정 — 중간에 죽어도 재전달본이
@@ -78,6 +112,10 @@ async def process_request(
     # 종결 상태 = at-least-once 중복 → 스킵, 이벤트 재발행 없음 (§3.1)
     if status in (AnalysisStatus.EMBEDDED.value, AnalysisStatus.FAILED.value):
         return
+
+    # 신규 메시지 = 새 런 시작 → retry_count 0 리셋. 회수 재개는 같은 런이라 유지 (§3.2, §6).
+    if not is_reclaimed:
+        await reset_retry_count(conn, request.resumeId)
 
     # EMBEDDING(REINDEX 진입·재개) / PARSED(구조화 완료) → 임베딩 단계
     if status in (AnalysisStatus.EMBEDDING.value, AnalysisStatus.PARSED.value):
@@ -129,7 +167,10 @@ async def _run_full_pipeline(
     if not await try_transition(conn, rid, AnalysisStatus.PARSING, AnalysisStatus.TEXT_EXTRACTING):
         return
     await publish(rid, uid, AnalysisStatus.TEXT_EXTRACTING, "")
-    text = await fetch_text(request.bucket, request.objectKey)
+    text = await _with_retry(
+        lambda: fetch_text(request.bucket, request.objectKey),
+        conn=conn, resume_id=rid, settings=settings,
+    )
     if is_empty_text(text):
         # 이미지-only(스캔) PDF — "0청크 EMBEDDED"와 구분해 명확히 실패 처리 (§2.1)
         msg = "텍스트 추출 실패(이미지-only PDF 가능성, OCR 미지원)"
@@ -141,7 +182,11 @@ async def _run_full_pipeline(
     if not await try_transition(conn, rid, AnalysisStatus.TEXT_EXTRACTING, AnalysisStatus.STRUCTURING):
         return
     await publish(rid, uid, AnalysisStatus.STRUCTURING, "")
-    data = structurer.structure(text)
+
+    async def _structure():
+        return structurer.structure(text)
+
+    data = await _with_retry(_structure, conn=conn, resume_id=rid, settings=settings)
     try:
         async with conn.transaction():
             await save_structured_data(conn, rid, data)
@@ -192,7 +237,10 @@ async def _run_embedding_stage(
         overlap_sentences=settings.chunk_overlap_sentences,
         chunk_version=settings.chunk_version,
     )
-    embeddings = embedder.embed_documents([c.content for c in chunks])
+    async def _embed():
+        return embedder.embed_documents([c.content for c in chunks])
+
+    embeddings = await _with_retry(_embed, conn=conn, resume_id=rid, settings=settings)
 
     # 산출물 저장 + 상태 전이를 한 트랜잭션으로 (§2.4 불변식 1, §3.3)
     try:

@@ -191,6 +191,7 @@ async def reclaim_pending_once(redis: Redis | None = None) -> int:
                 publish=publish,
                 settings=settings,
                 delivery_count=delivery_count,
+                is_reclaimed=True,  # 같은 런의 연장 — retry_count 리셋 안 함 (§3.2)
             )
         except Exception:
             logger.exception("회수 재처리 실패 — 다음 주기에 재시도 (resumeId=%s)", request.resumeId)
