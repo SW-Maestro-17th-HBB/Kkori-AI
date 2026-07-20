@@ -57,6 +57,8 @@ class Settings(BaseSettings):
     # --- 재량 파라미터 (§9) ---
     delivery_count_threshold: int = 3  # 초과 시 재처리 없이 FAILED (§4)
     claim_min_idle_ms: int = 300_000  # XAUTOCLAIM 회수 대상 판정(5분)
+    reclaim_interval_s: int = 300  # 회수 루프 주기(5분) — 최악 복구 지연 = min_idle + 주기 ≤ 10분
+    reclaim_batch_size: int = 10  # 한 번의 XAUTOCLAIM 으로 가져올 최대 메시지 수
 
     # --- 청킹 (§2.5) ---
     chunk_target_tokens: int = 512  # 초과 엔티티만 문장 경계로 분할

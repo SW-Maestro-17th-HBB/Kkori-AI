@@ -14,6 +14,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
+
 from redis.asyncio import Redis
 
 from faststream import FastStream
@@ -26,18 +29,21 @@ from src.db import connect, ensure_schema
 from src.extraction import build_s3_client, download_pdf, extract_text
 from src.pipeline import process_request
 
+logger = logging.getLogger(__name__)
+
 settings: Settings = get_settings()
 broker = RedisBroker(settings.redis_url)
 app = FastStream(broker)
 
 
 class _Resources:
-    """기동 시 준비되는 공유 자원 (DB 커넥션·AI 제공자·S3)."""
+    """기동 시 준비되는 공유 자원 (DB 커넥션·AI 제공자·S3·회수 루프)."""
 
     db = None  # psycopg AsyncConnection
     embedder: Embedder | None = None
     structurer: Structurer | None = None
     s3 = None  # boto3 client
+    reclaim_task: asyncio.Task | None = None
 
 
 async def fetch_text(bucket: str, object_key: str) -> str:
@@ -58,10 +64,13 @@ async def startup() -> None:
     _Resources.embedder = build_embedder(settings)
     _Resources.structurer = build_structurer(settings)
     _Resources.s3 = build_s3_client(settings)
+    _Resources.reclaim_task = asyncio.create_task(reclaim_loop())
 
 
 @app.on_shutdown
 async def shutdown() -> None:
+    if _Resources.reclaim_task is not None:
+        _Resources.reclaim_task.cancel()
     if _Resources.db is not None:
         await _Resources.db.close()
 
@@ -104,14 +113,13 @@ async def publish_status(
         group=settings.consumer_group,
         consumer=settings.resolved_consumer_name,
         # 주의: StreamSub 에 min_idle_time 을 주면 '새 메시지 읽기'가 아니라 '방치된 PEL 회수' 모드가
-        # 되어 갓 들어온 메시지를 못 읽는다(실측 확인). 회수(XAUTOCLAIM, §3)는 별도로 구현한다. TODO(§3).
+        # 되어 갓 들어온 메시지를 못 읽는다(실측 확인). 회수는 별도 루프로 구현 — reclaim_loop (§3).
     )
 )
 async def handle_parse_requested(request: ParseRequest, msg: RedisStreamMessage) -> None:
     """분석 요청 처리 진입점.
 
     정상 반환 = ACK(종결·스킵·양보·포기), 예외 = PEL 잔류 → 회수 대상.
-    TODO(§3): XAUTOCLAIM 회수 루프.
     """
 
     async def publish(rid: int, uid: int, status: AnalysisStatus, message: str) -> None:
@@ -133,3 +141,76 @@ async def handle_parse_requested(request: ParseRequest, msg: RedisStreamMessage)
         settings=settings,
         delivery_count=delivery_count,
     )
+
+
+# ---------------------------------------------------------------- 회수 (§3, XAUTOCLAIM)
+
+def _decode_fields(fields: dict) -> dict[str, str]:
+    """Redis 가 주는 bytes 필드맵을 계약 모델이 기대하는 str 맵으로."""
+    return {
+        (k.decode() if isinstance(k, bytes) else k): (
+            v.decode() if isinstance(v, bytes) else v
+        )
+        for k, v in fields.items()
+    }
+
+
+async def reclaim_pending_once(redis: Redis | None = None) -> int:
+    """ACK 없이 min_idle 이상 방치된 메시지를 회수해 재처리한다 (§3). 반환 = 처리 시도 건수.
+
+    - 회수본도 포기 규칙(§4) 적용 — XAUTOCLAIM 이 delivery count 를 +1 시키므로,
+      계속 실패하는 메시지는 회수 경로에서 임계에 도달해 FAILED 로 종결된다(무한 회수 차단).
+    - 정상 반환(완료·스킵·양보·포기) 후 **직접 XACK** — 자동 ACK 은 구독 핸들러 전용이다.
+      예외 시 ACK 하지 않아 다음 주기에 다시 회수된다.
+    """
+    redis = redis if redis is not None else broker._connection
+
+    _cursor, messages, _deleted = await redis.xautoclaim(
+        name=ParseRequest.STREAM_KEY,
+        groupname=settings.consumer_group,
+        consumername=settings.resolved_consumer_name,
+        min_idle_time=settings.claim_min_idle_ms,
+        count=settings.reclaim_batch_size,
+    )
+
+    processed = 0
+    for message_id, fields in messages:
+        request = ParseRequest.decode(_decode_fields(fields))
+        delivery_count = await get_delivery_count(redis, message_id)
+
+        async def publish(rid: int, uid: int, status: AnalysisStatus, message: str) -> None:
+            await publish_status(redis, rid, uid, status, message)
+
+        try:
+            await process_request(
+                request,
+                conn=_Resources.db,
+                embedder=_Resources.embedder,
+                structurer=_Resources.structurer,
+                fetch_text=fetch_text,
+                publish=publish,
+                settings=settings,
+                delivery_count=delivery_count,
+            )
+        except Exception:
+            logger.exception("회수 재처리 실패 — 다음 주기에 재시도 (resumeId=%s)", request.resumeId)
+            continue  # ACK 안 함 → PEL 잔류 → 다음 회수 대상
+
+        await redis.xack(ParseRequest.STREAM_KEY, settings.consumer_group, message_id)
+        processed += 1
+    return processed
+
+
+async def reclaim_loop() -> None:
+    """주기적으로 회수 시도 (§9: 주기 5분 — 최악 복구 지연 = min_idle + 주기 ≤ 10분).
+
+    루프 자체는 어떤 예외에도 죽지 않는다 — 죽으면 크래시 복구 기능이 사라지므로.
+    """
+    while True:
+        await asyncio.sleep(settings.reclaim_interval_s)
+        try:
+            reclaimed = await reclaim_pending_once()
+            if reclaimed:
+                logger.info("방치 메시지 %d건 회수 처리", reclaimed)
+        except Exception:
+            logger.exception("회수 루프 오류 — 다음 주기에 재시도")
