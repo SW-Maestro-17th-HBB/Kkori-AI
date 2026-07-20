@@ -52,6 +52,29 @@ class _Yield(Exception):
     """다른 처리자가 앞서감 — 트랜잭션 롤백 후 조용히 물러나기 위한 내부 신호."""
 
 
+async def _enter_stage(
+    conn: AsyncConnection,
+    rid: int,
+    uid: int,
+    from_status: AnalysisStatus,
+    to_status: AnalysisStatus,
+    publish: PublishStatus,
+) -> bool:
+    """단계 진입 = CAS 전이 + 진입 이벤트 발행 (§1.3, §3.3). False = 다른 처리자에 양보."""
+    if not await try_transition(conn, rid, from_status, to_status):
+        return False
+    await publish(rid, uid, to_status, "")
+    return True
+
+
+async def _fail(
+    conn: AsyncConnection, rid: int, uid: int, publish: PublishStatus, msg: str
+) -> None:
+    """FAILED 종결 — 실제로 기록됐을 때만 이벤트 발행 (완료·기존 실패를 덮지 않음, §4)."""
+    if await mark_failed(conn, rid, msg):
+        await publish(rid, uid, AnalysisStatus.FAILED, msg)
+
+
 async def _with_retry(
     thunk: Callable[[], Awaitable[T]],
     *,
@@ -99,8 +122,7 @@ async def process_request(
     # 같은 경로로 수렴한다(mark_failed 는 멱등, 종결 상태는 덮지 않음).
     if delivery_count >= settings.delivery_count_threshold:
         msg = f"재전달 임계 초과(delivery count={delivery_count})"
-        if await mark_failed(conn, request.resumeId, msg):
-            await publish(request.resumeId, request.userId, AnalysisStatus.FAILED, msg)
+        await _fail(conn, request.resumeId, request.userId, publish, msg)
         return
 
     status = await get_parse_status(conn, request.resumeId)
@@ -128,8 +150,7 @@ async def process_request(
     # 이른 상태인데 REINDEX = 계약 위반 (structured_data 가 있어야 할 모드, §2.3) → FAILED
     if request.mode is AnalysisMode.REINDEX:
         msg = f"계약 위반: mode=REINDEX 인데 상태가 {status} (structured_data 이전 단계)"
-        if await mark_failed(conn, request.resumeId, msg):
-            await publish(request.resumeId, request.userId, AnalysisStatus.FAILED, msg)
+        await _fail(conn, request.resumeId, request.userId, publish, msg)
         return
 
     # FULL — 처음부터 (§2.1). 크래시 재개(PARSING~STRUCTURING)도 원문 미저장이라 처음부터(§3.1).
@@ -158,30 +179,73 @@ async def _run_full_pipeline(
     rid, uid = request.resumeId, request.userId
     entry = AnalysisStatus(entry_status)
 
-    # 1단계: PARSING 진입 (started_at 기록은 db 계층이 담당)
-    if not await try_transition(conn, rid, entry, AnalysisStatus.PARSING):
+    # 1~2단계: PARSING 진입 → 텍스트 추출 (양보 또는 빈 추출 FAILED 시 None)
+    if not await _enter_stage(conn, rid, uid, entry, AnalysisStatus.PARSING, publish):
         return
-    await publish(rid, uid, AnalysisStatus.PARSING, "")
+    text = await _extract_stage(request, conn=conn, fetch_text=fetch_text,
+                                publish=publish, settings=settings)
+    if text is None:
+        return
 
-    # 2단계: 텍스트 추출 (원문은 저장하지 않는다 — 변수로만 흐름)
-    if not await try_transition(conn, rid, AnalysisStatus.PARSING, AnalysisStatus.TEXT_EXTRACTING):
+    # 3단계: LLM 구조화 + 저장 (양보 시 False)
+    if not await _structure_stage(request, text, conn=conn, structurer=structurer,
+                                  publish=publish, settings=settings):
         return
-    await publish(rid, uid, AnalysisStatus.TEXT_EXTRACTING, "")
+
+    # 4~5단계: 임베딩 (PARSED 에서 합류 — REINDEX 와 같은 경로)
+    await _run_embedding_stage(
+        request, entry_status=AnalysisStatus.PARSED.value, conn=conn,
+        embedder=embedder, publish=publish, settings=settings,
+    )
+
+
+async def _extract_stage(
+    request: ParseRequest,
+    *,
+    conn: AsyncConnection,
+    fetch_text: FetchText,
+    publish: PublishStatus,
+    settings: Settings,
+) -> str | None:
+    """2단계: 텍스트 추출. 원문은 저장하지 않는다 — 변수로만 흐른다 (§2.1).
+
+    반환 None = 여기서 종결됨(양보 또는 빈 추출 FAILED). 예외는 전파(재시도 대상).
+    """
+    rid, uid = request.resumeId, request.userId
+    if not await _enter_stage(
+        conn, rid, uid, AnalysisStatus.PARSING, AnalysisStatus.TEXT_EXTRACTING, publish
+    ):
+        return None
     text = await _with_retry(
         lambda: fetch_text(request.bucket, request.objectKey),
         conn=conn, resume_id=rid, settings=settings,
     )
     if is_empty_text(text):
         # 이미지-only(스캔) PDF — "0청크 EMBEDDED"와 구분해 명확히 실패 처리 (§2.1)
-        msg = "텍스트 추출 실패(이미지-only PDF 가능성, OCR 미지원)"
-        if await mark_failed(conn, rid, msg):
-            await publish(rid, uid, AnalysisStatus.FAILED, msg)
-        return
+        await _fail(conn, rid, uid, publish,
+                    "텍스트 추출 실패(이미지-only PDF 가능성, OCR 미지원)")
+        return None
+    return text
 
-    # 3단계: LLM 구조화 → 산출물 저장과 PARSED 전이를 한 트랜잭션으로 (§2.4 불변식 1)
-    if not await try_transition(conn, rid, AnalysisStatus.TEXT_EXTRACTING, AnalysisStatus.STRUCTURING):
-        return
-    await publish(rid, uid, AnalysisStatus.STRUCTURING, "")
+
+async def _structure_stage(
+    request: ParseRequest,
+    text: str,
+    *,
+    conn: AsyncConnection,
+    structurer: Structurer,
+    publish: PublishStatus,
+    settings: Settings,
+) -> bool:
+    """3단계: LLM 구조화 → 산출물 저장 + PARSED 전이를 한 트랜잭션으로 (§2.4 불변식 1).
+
+    반환 False = 다른 처리자에 양보. 예외는 전파(재시도 대상).
+    """
+    rid, uid = request.resumeId, request.userId
+    if not await _enter_stage(
+        conn, rid, uid, AnalysisStatus.TEXT_EXTRACTING, AnalysisStatus.STRUCTURING, publish
+    ):
+        return False
 
     async def _structure():
         return structurer.structure(text)
@@ -190,17 +254,14 @@ async def _run_full_pipeline(
     try:
         async with conn.transaction():
             await save_structured_data(conn, rid, data)
-            if not await try_transition(conn, rid, AnalysisStatus.STRUCTURING, AnalysisStatus.PARSED):
+            if not await try_transition(
+                conn, rid, AnalysisStatus.STRUCTURING, AnalysisStatus.PARSED
+            ):
                 raise _Yield()
     except _Yield:
-        return
+        return False
     await publish(rid, uid, AnalysisStatus.PARSED, "")
-
-    # 4~5단계: 임베딩 (PARSED 에서 합류 — REINDEX 와 같은 경로)
-    await _run_embedding_stage(
-        request, entry_status=AnalysisStatus.PARSED.value, conn=conn,
-        embedder=embedder, publish=publish, settings=settings,
-    )
+    return True
 
 
 async def _run_embedding_stage(
@@ -215,20 +276,19 @@ async def _run_embedding_stage(
     """청킹 → 임베딩 → 청크 교체 + EMBEDDED 전이(같은 트랜잭션, §2.4) → 이벤트 발행."""
     rid, uid = request.resumeId, request.userId
 
-    # PARSED 에서 왔으면 EMBEDDING 으로 CAS 진입 (0행 = 다른 처리자 → 양보)
+    # PARSED 에서 왔으면 EMBEDDING 으로 CAS 진입. REINDEX 는 DB 가 이미 EMBEDDING(Spring 세팅)
+    # 이라 전이 없이 진입 이벤트만 발행한다 (§1.3).
     if entry_status == AnalysisStatus.PARSED.value:
-        if not await try_transition(
-            conn, rid, AnalysisStatus.PARSED, AnalysisStatus.EMBEDDING
+        if not await _enter_stage(
+            conn, rid, uid, AnalysisStatus.PARSED, AnalysisStatus.EMBEDDING, publish
         ):
             return
-    # 단계 진입 이벤트 (§1.3). REINDEX 는 DB 가 이미 EMBEDDING(Spring 세팅)이라 전이 없이 발행만.
-    await publish(rid, uid, AnalysisStatus.EMBEDDING, "")
+    else:
+        await publish(rid, uid, AnalysisStatus.EMBEDDING, "")
 
     data = await load_structured_data(conn, rid)
     if data is None:
-        msg = "계약 위반: EMBEDDING 단계인데 structured_data 없음"
-        if await mark_failed(conn, rid, msg):
-            await publish(rid, uid, AnalysisStatus.FAILED, msg)
+        await _fail(conn, rid, uid, publish, "계약 위반: EMBEDDING 단계인데 structured_data 없음")
         return
 
     chunks = chunk_structured_data(
@@ -237,20 +297,29 @@ async def _run_embedding_stage(
         overlap_sentences=settings.chunk_overlap_sentences,
         chunk_version=settings.chunk_version,
     )
+
     async def _embed():
         return embedder.embed_documents([c.content for c in chunks])
 
     embeddings = await _with_retry(_embed, conn=conn, resume_id=rid, settings=settings)
 
-    # 산출물 저장 + 상태 전이를 한 트랜잭션으로 (§2.4 불변식 1, §3.3)
+    if not await _commit_chunks(conn, rid, chunks, embeddings):
+        return
+    await publish(rid, uid, AnalysisStatus.EMBEDDED, "")
+
+
+async def _commit_chunks(conn: AsyncConnection, rid: int, chunks, embeddings) -> bool:
+    """청크 교체 + EMBEDDED 전이를 한 트랜잭션으로 (§2.4 불변식 1, §3.3).
+
+    반환 False = 다른 처리자가 먼저 완료 → 롤백(승자의 청크 보존) 후 양보.
+    """
     try:
         async with conn.transaction():
             await replace_chunks(conn, rid, chunks, embeddings)
             if not await try_transition(
                 conn, rid, AnalysisStatus.EMBEDDING, AnalysisStatus.EMBEDDED
             ):
-                raise _Yield()  # 다른 처리자가 먼저 완료 → 롤백(승자의 청크 보존) 후 양보
+                raise _Yield()
     except _Yield:
-        return
-
-    await publish(rid, uid, AnalysisStatus.EMBEDDED, "")
+        return False
+    return True
