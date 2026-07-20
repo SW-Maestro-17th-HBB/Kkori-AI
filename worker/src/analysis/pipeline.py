@@ -18,10 +18,11 @@ from typing import Awaitable, Callable, TypeVar
 from psycopg import AsyncConnection
 
 from src.ai import Embedder, Structurer
-from src.chunking import chunk_structured_data
+from src.analysis.chunking import chunk_structured_data
+from src.analysis.extraction import is_empty_text
 from src.config import Settings
 from src.contract import AnalysisMode, AnalysisStatus, ParseRequest
-from src.db import (
+from src.storage.repository import (
     get_parse_status,
     increment_retry_count,
     load_structured_data,
@@ -31,7 +32,6 @@ from src.db import (
     save_structured_data,
     try_transition,
 )
-from src.extraction import is_empty_text
 
 T = TypeVar("T")
 

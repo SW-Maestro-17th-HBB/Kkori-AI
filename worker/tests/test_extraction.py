@@ -6,7 +6,7 @@ import fitz  # PyMuPDF
 import pytest
 
 from src.config import Settings
-from src.extraction import build_s3_client, download_pdf, extract_text, is_empty_text
+from src.analysis.extraction import build_s3_client, download_pdf, extract_text, is_empty_text
 
 MINIO_SETTINGS = Settings(
     s3_endpoint_url="http://localhost:9000",

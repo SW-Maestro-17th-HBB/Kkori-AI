@@ -20,7 +20,7 @@ from enum import Enum
 
 from pydantic import BaseModel
 
-from src.structured_data import Experience, Project, Skill, StructuredData
+from src.contract.structured_data import Experience, Project, Skill, StructuredData
 
 
 class ChunkType(str, Enum):

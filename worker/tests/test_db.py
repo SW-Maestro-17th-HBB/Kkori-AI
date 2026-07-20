@@ -2,9 +2,9 @@
 
 import pytest
 
-from src.chunking import Chunk, ChunkType
+from src.analysis.chunking import Chunk, ChunkType
 from src.contract import AnalysisStatus
-from src.db import (
+from src.storage.repository import (
     count_chunks,
     ensure_schema,
     get_parse_status,
@@ -16,7 +16,7 @@ from src.db import (
     save_structured_data,
     try_transition,
 )
-from src.structured_data import StructuredData
+from src.contract.structured_data import StructuredData
 from tests.conftest import DIM, requires_postgres, seed_resume
 
 pytestmark = requires_postgres

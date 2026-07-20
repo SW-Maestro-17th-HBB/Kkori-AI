@@ -16,7 +16,7 @@ import hashlib
 from typing import Protocol, runtime_checkable
 
 from src.config import Settings
-from src.structured_data import StructuredData
+from src.contract.structured_data import StructuredData
 
 
 @runtime_checkable

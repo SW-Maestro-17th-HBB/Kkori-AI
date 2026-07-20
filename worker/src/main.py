@@ -23,11 +23,11 @@ from faststream import FastStream
 from faststream.redis import RedisBroker, RedisStreamMessage, StreamSub
 
 from src.ai import Embedder, Structurer, build_embedder, build_structurer
+from src.analysis.extraction import build_s3_client, download_pdf, extract_text
+from src.analysis.pipeline import process_request
 from src.config import Settings, get_settings
 from src.contract import AnalysisStatus, ParseRequest, StatusChanged
-from src.db import connect, ensure_schema
-from src.extraction import build_s3_client, download_pdf, extract_text
-from src.pipeline import process_request
+from src.storage.repository import connect, ensure_schema
 
 logger = logging.getLogger(__name__)
 

@@ -11,7 +11,7 @@ import pytest_asyncio
 
 from src.config import Settings
 from src.contract import AnalysisStatus
-from src.db import connect, ensure_schema
+from src.storage.repository import connect, ensure_schema
 
 ADMIN_DSN = "postgresql://kkori:kkori@localhost:5432/kkori"
 TEST_DB = "kkori_worker_test"

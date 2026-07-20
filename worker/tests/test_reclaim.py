@@ -11,8 +11,8 @@ import redis.asyncio as aioredis
 import src.main as main
 from src.ai import FakeEmbedder, FakeStructurer
 from src.contract import AnalysisStatus, ParseRequest
-from src.db import count_chunks, get_parse_status
-from src.structured_data import StructuredData
+from src.storage.repository import count_chunks, get_parse_status
+from src.contract.structured_data import StructuredData
 from tests.conftest import DIM, requires_postgres, seed_resume
 from tests.test_pipeline import SD
 

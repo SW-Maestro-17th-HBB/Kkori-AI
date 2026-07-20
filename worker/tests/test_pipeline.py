@@ -5,9 +5,9 @@ import pytest
 from src.ai import FakeEmbedder, FakeStructurer
 from src.config import Settings
 from src.contract import AnalysisMode, AnalysisStatus, ParseRequest
-from src.db import count_chunks, get_parse_status, load_structured_data
-from src.pipeline import process_request
-from src.structured_data import StructuredData
+from src.storage.repository import count_chunks, get_parse_status, load_structured_data
+from src.analysis.pipeline import process_request
+from src.contract.structured_data import StructuredData
 from tests.conftest import DIM, requires_postgres, seed_resume
 
 pytestmark = requires_postgres

@@ -21,10 +21,10 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from src.chunking import Chunk
+from src.analysis.chunking import Chunk
 from src.config import Settings
 from src.contract import AnalysisStatus
-from src.structured_data import StructuredData
+from src.contract.structured_data import StructuredData
 
 
 def _utcnow() -> datetime:

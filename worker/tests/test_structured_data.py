@@ -3,7 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
-from src.structured_data import StructuredData
+from src.contract.structured_data import StructuredData
 
 
 def test_빈_구조_허용():

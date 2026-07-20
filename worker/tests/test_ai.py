@@ -11,7 +11,7 @@ from src.ai import (
     build_structurer,
 )
 from src.config import Settings
-from src.structured_data import Profile, StructuredData
+from src.contract.structured_data import Profile, StructuredData
 
 
 def test_가짜_구조화기_정해진값_반환():

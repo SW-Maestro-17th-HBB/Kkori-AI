@@ -1,7 +1,7 @@
 """청킹(§2.5) 테스트 — 엔티티 기반 + 초과 길이 분할."""
 
-from src.chunking import ChunkType, approx_tokens, chunk_structured_data, split_sentences
-from src.structured_data import Experience, Profile, Project, Skill, StructuredData
+from src.analysis.chunking import ChunkType, approx_tokens, chunk_structured_data, split_sentences
+from src.contract.structured_data import Experience, Profile, Project, Skill, StructuredData
 
 
 def _sample() -> StructuredData:
