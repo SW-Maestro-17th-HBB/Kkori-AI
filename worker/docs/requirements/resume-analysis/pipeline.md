@@ -21,7 +21,7 @@ Worker는 Spring 백엔드가 발행한 이력서 분석 요청을 Redis Stream�
    └─ SSE로 프론트에 실시간 push
 ```
 
-- 스택: **FastStream(Redis 브로커) + uv + Python 3.12**
+- 스택: **FastStream(Redis 브로커) + uv(잠금 uv.lock) + Python 3.13**
 - 연동 인프라: Redis 스트림 2개, PostgreSQL(pgvector), S3/MinIO, AWS Bedrock(LLM·임베딩)
 - 불변 원칙: **모든 분석 요청은 반드시 `EMBEDDED` 또는 `FAILED`로 종결한다.**
 

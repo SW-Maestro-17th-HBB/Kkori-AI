@@ -49,18 +49,15 @@ jobs:
           # 테스트가 PR 코드(및 의존성)를 실행하므로 git 설정에 토큰을 남기지 않는다
           persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v5
         with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: |
-            worker/requirements.txt
-            worker/requirements-dev.txt
+          enable-cache: true
+          cache-dependency-glob: "worker/uv.lock"
 
       - name: Install dependencies
-        run: |
-          pip install -r worker/requirements.txt
-          pip install -r worker/requirements-dev.txt
+        # 파이썬 버전은 worker/.python-version(3.13)을 uv 가 자동으로 맞춘다
+        working-directory: worker
+        run: uv sync --locked
 
       # MinIO 는 시작 명령(server /data)이 필요해 services 로 못 띄운다 → 직접 실행 + 버킷 생성
       - name: Start MinIO and create bucket
@@ -68,7 +65,7 @@ jobs:
           docker run -d --name minio -p 9000:9000 \
             -e MINIO_ROOT_USER=kkori -e MINIO_ROOT_PASSWORD=kkori1234 \
             minio/minio server /data
-          python - <<'EOF'
+          uv run --project worker python - <<'EOF'
           import time
           import boto3
           from botocore.exceptions import ClientError, EndpointConnectionError
@@ -95,5 +92,4 @@ jobs:
           EOF
 
       - name: Run tests
-        run: |
-          pytest worker
+        run: uv run --project worker pytest worker
