@@ -5,7 +5,7 @@
 Kkori — AI 면접 준비 서비스의 AI 컴포넌트 (SW마에스트로 팀 HBB). Python 3.13 / uv workspace 모노레포.
 
 - `agent/` (`kkori-agent`) — LiveKit 음성 에이전트. 면접 실시간 루프(STT→LLM→TTS) 담당
-- `worker/` (`kkori-worker`) — 비동기 평가 워커. 리포트용 상세 평가 (구현 예정)
+- `worker/` — 비동기 평가 워커. 리포트용 상세 평가 (구현 예정). **uv 워크스페이스 미편입** — 현재 pip + requirements.txt 유지(다른 팀원 작업 영역, 편입은 담당자와 조율 후)
 - `shared/` — 공용 코드. 아직 미사용 — 실제 import가 생기는 시점에 워크스페이스 멤버로 승격
 
 ## 명령어
@@ -30,7 +30,7 @@ docker build -f worker/Dockerfile -t kkori-worker .
 
 ## 기술적 결정사항
 
-- **uv workspace 단일 락파일** — 개발은 루트 venv 하나로 하되, 배포는 서비스별 독립 이미지. 각 Dockerfile이 `uv sync --frozen --package <이름>`으로 그 서비스 의존성만 설치하므로 배포 결합 없음. 멤버 pyproject에 build-system을 두지 않아 uv는 의존성만 설치(현행 `src/` 레이아웃 유지)
+- **uv workspace 단일 락파일** — 개발은 루트 venv 하나로 하되, 배포는 서비스별 독립 이미지. 멤버 Dockerfile이 `uv sync --frozen --package <이름>`으로 그 서비스 의존성만 설치하므로 배포 결합 없음. 멤버 pyproject에 build-system을 두지 않아 uv는 의존성만 설치(현행 `src/` 레이아웃 유지). 현재 멤버는 agent뿐(worker는 위 개요 참조)
 - **livekit-agents + LiveKit Inference** — 최종적으로 self-host SFU 예정이라 STT·LLM·TTS built-in이 없어 직접 연동이 필요하지만, 개발 단계에서는 LiveKit Cloud + Inference를 사용해 별도 프로바이더 API 키 없이 LiveKit 자격증명 하나로 동작. 모델 구성은 `agent/src/main.py` 상단 상수로, 교체 시 상수만 변경
 - **자동 디스패치(임시)** — `agent_name` 미지정으로 모든 신규 룸에 에이전트가 자동 입장(테스트 편의). Spring이 `createDispatch(agentName)`로 명시 디스패치하는 방식은 세션 생성 스토리에서 전환
 - **재연결 미처리(현재)** — 참가자 퇴장 시 세션 즉시 종료(기본값). `close_on_disconnect=False` + 재연결 창 처리는 INTERRUPTED 상태 스토리 범위
@@ -44,7 +44,7 @@ docker build -f worker/Dockerfile -t kkori-worker .
 - PR 제목은 `<타입>: [HBB1-<지라번호>] <요약>` 형식 (예: `feat: [HBB1-263] livekit-agents 및 기본 플러그인 연동`) — 지라 키가 제목에 있으면 GitHub for Atlassian이 티켓에 자동 연결
 - PR 본문은 템플릿(관련 이슈 / 실행 검증 / PRD 경로 / 완료 조건) 준수 — 완료 조건은 PRD에서 발췌한 검증 가능한 문장으로 작성하고, 체크는 검증된 후에만
 - CodeRabbit이 develop 대상 PR을 자동 리뷰 (draft는 제외 — ready 전환 시점에 리뷰 시작, 이후 커밋은 증분 리뷰). 재리뷰가 필요하면 `@coderabbitai review` 코멘트
-- CI(GitHub Actions)는 agent/worker 경로별 워크플로우가 main/develop 대상 push·PR에서 `uv sync --frozen` + import 검증 + pytest 실행
+- CI(GitHub Actions)는 agent/worker 경로별 워크플로우가 main/develop 대상 push·PR에서 실행 — agent는 `uv sync --locked` + import 검증 + pytest, worker는 pip 기반(현행 유지)
 
 ## 문서 참조 맵
 

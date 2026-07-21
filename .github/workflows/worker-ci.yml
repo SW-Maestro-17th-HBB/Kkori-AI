@@ -6,15 +6,11 @@ on:
     paths:
       - "worker/**"
       - "shared/**"
-      - "pyproject.toml"
-      - "uv.lock"
       - ".github/workflows/worker-ci.yml"
   pull_request:
     paths:
       - "worker/**"
       - "shared/**"
-      - "pyproject.toml"
-      - "uv.lock"
       - ".github/workflows/worker-ci.yml"
 
 jobs:
@@ -23,17 +19,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: astral-sh/setup-uv@v8.3.2
+      - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
-          enable-cache: true
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: worker/requirements.txt
 
       - name: Install dependencies
-        run: uv sync --locked --package kkori-worker
-
-      - name: Import check
-        run: cd worker && uv run --no-sync python -c "import src.main"
+        run: |
+          pip install -r worker/requirements.txt
+          pip install pytest
 
       - name: Run tests
-        # 테스트 추가 시 수정 (exit 5 = 수집된 테스트 없음 → 통과 처리)
-        run: uv run --no-sync --with pytest pytest worker || [ $? -eq 5 ]
+      # 테스트 추가 시 수정
+        run: |
+          pytest worker || [ $? -eq 5 ]
