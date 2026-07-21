@@ -150,6 +150,20 @@ DB의 `structured_data`(사용자 수정본)를 기준(source of truth)으로 �
   **REINDEX 한 바퀴로 백필**(구버전 `chunk_version` 대상)하면 되고 DDL 마이그레이션이 없다 — 그래서 첫 버전을
   과튜닝하지 않는다. 검색 품질을 실측하며 파라미터(목표 크기·오버랩)나 계층형(parent-child)으로 승급.
 
+### 2.6 청크 풍부화(enrichment) — 확정 (2026-07-21)
+
+청크를 저장하기 전에 **LLM 이 청크들을 읽고 부가 정보를 뽑아 metadata 에 병합**한다. 질문 생성(agent)의
+재료를 색인 시점에 미리 준비하고, 엔티티 청크의 "여러 주제 뭉개짐"(실측)을 보조 검색으로 보완하기 위함.
+
+- **필드 3종**: `topics`(주제 명사구) · `relatedConcepts`(기술 개념) · `questionHints`(질문 소재).
+  전부 청크에 실제 근거가 있는 것만(지어내기 금지).
+- **호출 단위: 이력서당 1회** — 전 청크를 한 프롬프트에 넣어 추출(호출 수 절약 + 청크 간 표기 일관).
+  결과 배열의 길이·순서가 청크와 다르면 오류로 취급(재시도 대상).
+- **필수 단계** — 위치는 청킹과 임베딩 사이(EMBEDDING 단계 내부, 새 상태 없음). 실패는 구조화와 동일하게
+  내부 재시도 → 소진 시 전파(재전달 경로). "풍부화 없는 청크"라는 부분 상태를 만들지 않는다.
+- **임베딩 입력은 content 그대로** — 풍부화 결과를 임베딩에 섞는 것은 효과 불확실로 보류(§10).
+- `metadata.chunk_version = 2` 로 상향(색인 스키마 버전) — v1 청크는 향후 REINDEX 백필 대상 식별 가능.
+
 ---
 
 ## 3. 복구·재개 (XAUTOCLAIM)
@@ -192,10 +206,15 @@ at-least-once + XAUTOCLAIM 회수는 **실제로 죽지 않은 원본과 회수�
 
 메시지 수신·회수 **직후, 처리 시작 전**에 delivery count를 확인한다. 임계(기본 **3**) 이상이면 재처리 없이:
 
-1. DB에 **`FAILED` 기록** (`error_message` = `"재전달 임계 초과"` + 당시 count) → `failed_at` 기록
+1. DB에 **`FAILED` 기록** → `failed_at` 기록. `error_message` 는 `"재전달 임계 초과(delivery count=N)"` 에
+   **기록된 마지막 실패 원인을 덧붙인다**(아래 원인 기록 참조) — 운영·디버깅용.
 2. **XACK**
 
 - **이 순서 고정.** 중간에 죽어도 재전달받은 쪽이 같은 경로를 다시 타면 수렴한다(①은 멱등 — 이미 FAILED면 그대로).
+- **실패 원인 기록**: 내부 재시도 소진 시(§6)와 예상 밖 예외 시, 마지막 오류 요약을 `error_message` 에
+  **best-effort 로 기록**해 둔다(상태는 유지). 포기 시점에 이 기록을 합류시켜 DB 에서 원인 추적이 가능하다.
+  단 **상태 이벤트(SSE)의 message 는 간단 문구만** — 내부 예외 문구를 사용자 화면에 노출하지 않는다.
+  DB 자체가 죽은 경우는 기록 불가(원리적 한계) — 워커 로그가 담당.
 - `FAILED`는 Worker가 내부 재시도를 소진했거나 재전달 임계를 초과한 **끝 상태**다. 서버는 자동 재시도하지
   않으며, 복구는 항상 사용자의 §재분석 API가 유일 경로.
 
@@ -304,6 +323,9 @@ at-least-once + XAUTOCLAIM 회수는 **실제로 죽지 않은 원본과 회수�
 - 2026-07-16 백엔드 HBB1-232 확정 전달: (1) REINDEX 진입 상태 세팅 `ResumeAnalysisStatus.restartFor` 구현·PR#44 머지 예정,
   (2) AI 모델 = Haiku 4.5 + Cohere v3(둘 다 기반영), (3) 백엔드 `StructuredData` 경로 `dto/`→`domain/`(내용 동일, 워커 무영향),
   (4) `resume_analysis_status` 시각 컬럼 `timestamp`→**`timestamptz`(UTC)** → 워커는 UTC-aware로 기록. → §8.
+- 2026-07-21 청크 풍부화(enrichment) 도입: **topics·relatedConcepts·questionHints** 를 이력서당 1회 LLM 호출로
+  추출해 metadata 병합(필수 단계, chunk_version 2). 포기 시 error_message 에 **마지막 실패 원인 합류**
+  (DB 상세 / SSE 간단 분리). → §2.6, §4.
 - 2026-07-21 Bedrock 리전·모델 확정: 임베딩은 v3 미제공으로 **Embed v4(`cohere.embed-v4:0`)로 변경**(출력 차원
   1024 지정, `vector(1024)` 스키마 유지). 리전은 서울로 정했다가 **같은 날 번복 — 조직 SCP 가 us-east-1 만
   허용**(서울·cross-region 프로파일 전부 명시적 거부, 실 호출 탐침으로 확인) → **us-east-1 확정**.

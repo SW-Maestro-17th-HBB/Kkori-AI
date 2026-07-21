@@ -17,8 +17,18 @@ import hashlib
 import json
 from typing import Protocol, runtime_checkable
 
+from pydantic import BaseModel, Field
+
 from src.config import Settings
 from src.contract.structured_data import StructuredData
+
+
+class ChunkEnrichment(BaseModel):
+    """청크 풍부화 결과 — LLM 이 청크를 읽고 뽑은 부가 정보 (metadata 에 병합됨)."""
+
+    topics: list[str] = Field(default_factory=list)  # 청크가 다루는 주제
+    relatedConcepts: list[str] = Field(default_factory=list)  # 등장·밀접 기술 개념
+    questionHints: list[str] = Field(default_factory=list)  # 면접 질문 소재
 
 
 @runtime_checkable
@@ -39,6 +49,13 @@ class Embedder(Protocol):
     def embed_query(self, text: str) -> list[float]:
         """질의용 임베딩(search_query). 주로 검색(agent) 측에서 사용."""
         ...
+
+
+@runtime_checkable
+class Enricher(Protocol):
+    """청크 목록 → 청크별 풍부화 정보 (이력서당 1회 호출, 입력 순서·길이 보존)."""
+
+    def enrich(self, chunk_contents: list[str]) -> list[ChunkEnrichment]: ...
 
 
 class FakeStructurer:
@@ -75,6 +92,18 @@ class FakeEmbedder:
 
     def embed_query(self, text: str) -> list[float]:
         return self._vector(text)
+
+
+class FakeEnricher:
+    """정해진 풍부화 결과를 반환하는 가짜. 기본은 청크 수만큼 빈 enrichment."""
+
+    def __init__(self, results: list[ChunkEnrichment] | None = None) -> None:
+        self._results = results
+
+    def enrich(self, chunk_contents: list[str]) -> list[ChunkEnrichment]:
+        if self._results is not None:
+            return self._results
+        return [ChunkEnrichment() for _ in chunk_contents]
 
 
 # ---------------------------------------------------------------- Bedrock 구현
@@ -166,6 +195,70 @@ class BedrockEmbedder:
         return self._invoke([text], "search_query")[0]
 
 
+_ENRICH_PROMPT = """\
+다음은 한 이력서에서 잘라낸 청크 {count}개다. 각 청크에 대해 면접 질문 생성에 도움이
+되는 부가 정보를 추출해 save_enrichments 도구로 저장하라.
+
+각 청크마다:
+- topics: 청크가 다루는 주제 (2~5개, 짧은 한국어 명사구. 예: "성능 최적화", "인증")
+- relatedConcepts: 청크에 등장하거나 밀접한 기술 개념 (구체적인 기술·패턴 이름 그대로)
+- questionHints: 이 청크로 만들 수 있는 면접 질문 소재 (2~4개, 짧은 구)
+
+규칙:
+- 청크에 실제 근거가 있는 것만 뽑는다. 지어내지 않는다.
+- enrichments 배열의 순서와 길이는 입력 청크와 정확히 같아야 한다 ({count}개).
+
+청크 목록:
+{chunks}
+"""
+
+
+class _EnrichmentResult(BaseModel):
+    enrichments: list[ChunkEnrichment]
+
+
+class BedrockEnricher:
+    """Claude(Bedrock) 풍부화 — 이력서당 1회 호출로 전 청크의 부가 정보를 뽑는다."""
+
+    def __init__(self, settings: Settings) -> None:
+        from anthropic import AnthropicBedrock
+
+        self._client = AnthropicBedrock(aws_region=settings.bedrock_region)
+        self._model_id = settings.structuring_model_id  # 구조화와 같은 모델 사용
+
+    def enrich(self, chunk_contents: list[str]) -> list[ChunkEnrichment]:
+        if not chunk_contents:
+            return []
+        listing = "\n\n".join(
+            f"--- 청크 {i} ---\n{content}" for i, content in enumerate(chunk_contents, 1)
+        )
+        tool = {
+            "name": "save_enrichments",
+            "description": "청크별 풍부화 정보를 저장한다.",
+            "input_schema": _EnrichmentResult.model_json_schema(),
+        }
+        message = self._client.messages.create(
+            model=self._model_id,
+            max_tokens=4096,
+            tools=[tool],
+            tool_choice={"type": "tool", "name": "save_enrichments"},
+            messages=[{
+                "role": "user",
+                "content": _ENRICH_PROMPT.format(count=len(chunk_contents), chunks=listing),
+            }],
+        )
+        for block in message.content:
+            if block.type == "tool_use":
+                result = _EnrichmentResult.model_validate(block.input)
+                if len(result.enrichments) != len(chunk_contents):
+                    raise ValueError(
+                        f"풍부화 개수 불일치: 청크 {len(chunk_contents)}개 ≠ "
+                        f"결과 {len(result.enrichments)}개"
+                    )
+                return result.enrichments
+        raise ValueError("풍부화 응답에 tool_use 블록이 없음")
+
+
 # ---------------------------------------------------------------- 팩토리
 
 def build_structurer(settings: Settings) -> Structurer:
@@ -181,4 +274,12 @@ def build_embedder(settings: Settings) -> Embedder:
         return FakeEmbedder(dim=settings.embedding_dim)
     if settings.ai_provider == "bedrock":
         return BedrockEmbedder(settings)
+    raise ValueError(f"알 수 없는 ai_provider: {settings.ai_provider}")
+
+
+def build_enricher(settings: Settings) -> Enricher:
+    if settings.ai_provider == "fake":
+        return FakeEnricher()
+    if settings.ai_provider == "bedrock":
+        return BedrockEnricher(settings)
     raise ValueError(f"알 수 없는 ai_provider: {settings.ai_provider}")

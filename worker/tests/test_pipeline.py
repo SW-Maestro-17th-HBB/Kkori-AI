@@ -2,7 +2,7 @@
 
 import pytest
 
-from src.ai import FakeEmbedder, FakeStructurer
+from src.ai import FakeEmbedder, FakeEnricher, FakeStructurer
 from src.config import Settings
 from src.contract import AnalysisMode, AnalysisStatus, ParseRequest
 from src.storage.repository import count_chunks, get_parse_status, load_structured_data
@@ -53,6 +53,7 @@ async def _run(conn, rid, mode=AnalysisMode.REINDEX, *, text="이력서 원문 �
         conn=conn,
         embedder=FakeEmbedder(dim=DIM),
         structurer=FakeStructurer(StructuredData.model_validate(SD)),
+        enricher=FakeEnricher(),
         fetch_text=_fetch_text(text),
         publish=rec,
         settings=Settings(embedding_dim=DIM),
@@ -92,7 +93,7 @@ async def test_레코드없는_유령메시지_스킵(conn):
     await process_request(
         _request(999999),
         conn=conn, embedder=FakeEmbedder(dim=DIM),
-        structurer=FakeStructurer(), fetch_text=_fetch_text(),
+        structurer=FakeStructurer(), enricher=FakeEnricher(), fetch_text=_fetch_text(),
         publish=rec, settings=Settings(embedding_dim=DIM),
     )
     assert rec.events == []
@@ -163,7 +164,7 @@ async def test_FULL_추출예외는_전파되어_PEL잔류(conn):
         await process_request(
             _request(rid, AnalysisMode.FULL),
             conn=conn, embedder=FakeEmbedder(dim=DIM),
-            structurer=FakeStructurer(), fetch_text=broken_fetch,
+            structurer=FakeStructurer(), enricher=FakeEnricher(), fetch_text=broken_fetch,
             publish=rec, settings=Settings(embedding_dim=DIM),
         )
     # 상태는 TEXT_EXTRACTING 에 남음 → 재전달 시 §3.1 표대로 처음부터
@@ -195,6 +196,7 @@ async def _run_with_delivery(conn, rid, delivery_count, mode=AnalysisMode.FULL) 
         _request(rid, mode),
         conn=conn, embedder=FakeEmbedder(dim=DIM),
         structurer=FakeStructurer(StructuredData.model_validate(SD)),
+        enricher=FakeEnricher(),
         fetch_text=_fetch_text(), publish=rec,
         settings=Settings(embedding_dim=DIM),  # delivery_count_threshold 기본 3
         delivery_count=delivery_count,
@@ -228,3 +230,48 @@ async def test_포기규칙_이미_EMBEDDED면_덮지않음(conn):
     rec = await _run_with_delivery(conn, rid, delivery_count=5)
     assert await get_parse_status(conn, rid) == "EMBEDDED"  # 보호됨
     assert rec.events == []  # 이벤트 재발행 없음
+
+
+@pytest.mark.asyncio
+async def test_풍부화_결과가_metadata에_병합됨(conn):
+    """§2.6: enricher 가 뽑은 topics·questionHints 가 청크 metadata 에 저장된다."""
+    from src.ai import ChunkEnrichment
+
+    rid = await seed_resume(conn, AnalysisStatus.EMBEDDING, SD)
+    enrichments = [  # SD 는 청크 3개(프로젝트1·경력1·스킬1)를 만든다
+        ChunkEnrichment(topics=["비동기 처리"], relatedConcepts=["Redis Stream"],
+                        questionHints=["도입 이유"]),
+        ChunkEnrichment(topics=["실무 경험"]),
+        ChunkEnrichment(),
+    ]
+    rec = Recorder()
+    await process_request(
+        _request(rid), conn=conn, embedder=FakeEmbedder(dim=DIM),
+        structurer=FakeStructurer(), enricher=FakeEnricher(enrichments),
+        fetch_text=_fetch_text(), publish=rec, settings=Settings(embedding_dim=DIM),
+    )
+    assert await get_parse_status(conn, rid) == "EMBEDDED"
+    cur = await conn.execute(
+        "SELECT metadata FROM resume_chunks WHERE resume_id = %s ORDER BY id", (rid,))
+    metas = [row["metadata"] for row in await cur.fetchall()]
+    assert metas[0]["topics"] == ["비동기 처리"]
+    assert metas[0]["relatedConcepts"] == ["Redis Stream"]
+    assert metas[0]["questionHints"] == ["도입 이유"]
+    assert metas[1]["topics"] == ["실무 경험"]
+    assert metas[2]["topics"] == []  # 빈 풍부화도 키는 존재 (부분 상태 없음)
+    assert all(m["chunk_version"] == 2 for m in metas)  # 색인 스키마 v2
+
+
+@pytest.mark.asyncio
+async def test_포기시_DB엔_마지막오류_합류_SSE는_간단문구(conn):
+    """§4 개선: DB error_message 에는 원인 상세, SSE 이벤트에는 간단 문구."""
+    from src.storage.repository import get_error_message, record_last_error
+
+    rid = await seed_resume(conn, AnalysisStatus.UPLOADED, None)
+    await record_last_error(conn, rid, "ConnectionError: Bedrock 연결 실패")  # 이전 실패의 기록
+    rec = await _run_with_delivery(conn, rid, delivery_count=3)
+
+    assert await get_parse_status(conn, rid) == "FAILED"
+    db_msg = await get_error_message(conn, rid)
+    assert "재전달 임계 초과" in db_msg and "마지막 오류: ConnectionError" in db_msg  # DB 상세
+    assert rec.events[-1][3] == "재전달 임계 초과(delivery count=3)"  # SSE 간단 (원인 미포함)

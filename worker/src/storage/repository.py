@@ -134,6 +134,33 @@ async def mark_failed(conn: AsyncConnection, resume_id: int, message: str) -> bo
     return cur.rowcount == 1
 
 
+async def record_last_error(conn: AsyncConnection, resume_id: int, summary: str) -> None:
+    """진행 중 마지막 실패 원인을 기록한다 (상태는 바꾸지 않음) — best-effort.
+
+    포기 규칙(§4)이 종결할 때 이 값을 error_message 에 합류시켜 원인 추적을 가능하게 한다.
+    기록 자체가 실패해도(예: DB 장애) 조용히 넘어간다 — 부가 기능의 실패가 원래 예외
+    전파(재시도 경로)를 가리면 안 되기 때문. 그 경우는 워커 로그가 담당한다.
+    """
+    try:
+        await conn.execute(
+            "UPDATE resume_analysis_status SET error_message = %s, updated_at = %s "
+            "WHERE resume_id = %s",
+            (summary[:500], _utcnow(), resume_id),
+        )
+    except Exception:
+        pass
+
+
+async def get_error_message(conn: AsyncConnection, resume_id: int) -> str | None:
+    """기록된 마지막 오류(또는 실패 사유) 조회 — 포기 규칙의 메시지 합성용."""
+    cur = await conn.execute(
+        "SELECT error_message FROM resume_analysis_status WHERE resume_id = %s",
+        (resume_id,),
+    )
+    row = await cur.fetchone()
+    return row["error_message"] if row else None
+
+
 async def reset_retry_count(conn: AsyncConnection, resume_id: int) -> None:
     """새 런 시작 시 0 으로 리셋 (§6 — 신규 메시지에서만, 회수 재개에선 호출하지 않는다)."""
     await conn.execute(
@@ -181,23 +208,34 @@ async def replace_chunks(
     resume_id: int,
     chunks: list[Chunk],
     embeddings: list[list[float]],
+    enrichments: list[dict] | None = None,
 ) -> None:
     """기존 청크 전부 삭제 후 재삽입 (§3.1 — 임베딩 진입 시 항상 선삭제, 중복·잔여 청크 방지).
 
+    enrichments 가 주어지면 청크별 metadata 에 병합한다 (§2.6 풍부화).
     삭제·삽입의 원자성은 호출자의 `conn.transaction()` 이 보장한다.
     """
     if len(chunks) != len(embeddings):
         raise ValueError(f"청크 {len(chunks)}개 ≠ 임베딩 {len(embeddings)}개")
+    if enrichments is not None and len(enrichments) != len(chunks):
+        raise ValueError(f"청크 {len(chunks)}개 ≠ 풍부화 {len(enrichments)}개")
     await conn.execute("DELETE FROM resume_chunks WHERE resume_id = %s", (resume_id,))
     if not chunks:
         return  # 0청크 이력서 — 삭제만 하고 끝 (§2.5)
+
+    def metadata(i: int, chunk: Chunk) -> dict:
+        merged = chunk.metadata()
+        if enrichments is not None:
+            merged.update(enrichments[i])
+        return merged
+
     async with conn.cursor() as cur:
         await cur.executemany(
             "INSERT INTO resume_chunks (resume_id, content, metadata, embedding) "
             "VALUES (%s, %s, %s, %s)",
             [
-                (resume_id, c.content, Jsonb(c.metadata()), Vector(e))
-                for c, e in zip(chunks, embeddings)
+                (resume_id, c.content, Jsonb(metadata(i, c)), Vector(e))
+                for i, (c, e) in enumerate(zip(chunks, embeddings))
             ],
         )
 

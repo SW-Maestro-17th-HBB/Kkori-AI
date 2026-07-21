@@ -16,14 +16,14 @@ from redis.asyncio import Redis
 from faststream import FastStream
 from faststream.redis import RedisBroker, RedisStreamMessage, StreamSub
 
-from src.ai import Embedder, Structurer, build_embedder, build_structurer
+from src.ai import Embedder, Enricher, Structurer, build_embedder, build_enricher, build_structurer
 from src.analysis.extraction import build_s3_client, download_pdf, extract_text
 from src.analysis.pipeline import process_request
 from src.config import Settings, get_settings
 from src.contract import AnalysisStatus, ParseRequest
 from src.messaging.reclaim import reclaim_loop, reclaim_pending_once as _reclaim_once
 from src.messaging.streams import get_delivery_count, publish_status
-from src.storage.repository import connect, ensure_schema
+from src.storage.repository import connect, ensure_schema, record_last_error
 
 settings: Settings = get_settings()
 broker = RedisBroker(settings.redis_url)
@@ -36,6 +36,7 @@ class _Resources:
     db = None  # psycopg AsyncConnection
     embedder: Embedder | None = None
     structurer: Structurer | None = None
+    enricher: Enricher | None = None
     s3 = None  # boto3 client
     reclaim_task: asyncio.Task | None = None
 
@@ -62,17 +63,24 @@ async def _process(
     async def publish(rid: int, uid: int, status: AnalysisStatus, message: str) -> None:
         await publish_status(redis, rid, uid, status, message)
 
-    await process_request(
-        request,
-        conn=_Resources.db,
-        embedder=_Resources.embedder,
-        structurer=_Resources.structurer,
-        fetch_text=fetch_text,
-        publish=publish,
-        settings=settings,
-        delivery_count=delivery_count,
-        is_reclaimed=is_reclaimed,
-    )
+    try:
+        await process_request(
+            request,
+            conn=_Resources.db,
+            embedder=_Resources.embedder,
+            structurer=_Resources.structurer,
+            enricher=_Resources.enricher,
+            fetch_text=fetch_text,
+            publish=publish,
+            settings=settings,
+            delivery_count=delivery_count,
+            is_reclaimed=is_reclaimed,
+        )
+    except Exception as e:
+        # 예상 밖 예외도 원인 한 줄을 DB 에 남기고(§4 합류용, best-effort) 원래대로 전파한다
+        # — 전파돼야 ACK 없이 끝나 PEL 재전달(회수)로 이어진다.
+        await record_last_error(_Resources.db, request.resumeId, f"{type(e).__name__}: {e}")
+        raise
 
 
 @app.on_startup
@@ -81,6 +89,7 @@ async def startup() -> None:
     await ensure_schema(_Resources.db, dim=settings.embedding_dim)
     _Resources.embedder = build_embedder(settings)
     _Resources.structurer = build_structurer(settings)
+    _Resources.enricher = build_enricher(settings)
     _Resources.s3 = build_s3_client(settings)
     _Resources.reclaim_task = asyncio.create_task(
         reclaim_loop(

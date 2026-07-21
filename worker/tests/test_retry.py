@@ -2,7 +2,7 @@
 
 import pytest
 
-from src.ai import FakeEmbedder, FakeStructurer
+from src.ai import FakeEmbedder, FakeEnricher, FakeStructurer
 from src.config import Settings
 from src.contract import AnalysisMode, AnalysisStatus, ParseRequest
 from src.storage.repository import get_parse_status
@@ -47,6 +47,7 @@ async def _run_full(conn, rid, fetch, *, is_reclaimed=False) -> Recorder:
         conn=conn,
         embedder=FakeEmbedder(dim=DIM),
         structurer=FakeStructurer(StructuredData.model_validate(SD)),
+        enricher=FakeEnricher(),
         fetch_text=fetch,
         publish=rec,
         settings=SETTINGS,
@@ -100,3 +101,16 @@ async def test_회수재개는_retry_count_유지(conn):
     await _run_full(conn, rid, FlakyFetch(fail_times=0), is_reclaimed=True)
     assert await get_parse_status(conn, rid) == "EMBEDDED"
     assert await _retry_count(conn, rid) == 2  # 유지
+
+
+@pytest.mark.asyncio
+async def test_재시도_소진시_마지막오류가_DB에_기록됨(conn):
+    """§4 개선: 소진 시점에 error_message 에 원인이 남는다 (상태는 단계 유지)."""
+    from src.storage.repository import get_error_message
+
+    rid = await seed_resume(conn, AnalysisStatus.UPLOADED, None)
+    with pytest.raises(ConnectionError):
+        await _run_full(conn, rid, FlakyFetch(fail_times=99))
+    recorded = await get_error_message(conn, rid)
+    assert recorded is not None and "ConnectionError" in recorded
+    assert await get_parse_status(conn, rid) == "TEXT_EXTRACTING"  # 상태는 안 바뀜

@@ -9,7 +9,7 @@ import pytest_asyncio
 import redis.asyncio as aioredis
 
 import src.main as main
-from src.ai import FakeEmbedder, FakeStructurer
+from src.ai import FakeEmbedder, FakeEnricher, FakeStructurer
 from src.contract import AnalysisStatus, ParseRequest
 from src.storage.repository import count_chunks, get_parse_status
 from src.contract.structured_data import StructuredData
@@ -63,6 +63,7 @@ def wired(conn, monkeypatch):
     monkeypatch.setattr(
         main._Resources, "structurer", FakeStructurer(StructuredData.model_validate(SD))
     )
+    monkeypatch.setattr(main._Resources, "enricher", FakeEnricher())
     monkeypatch.setattr(main.settings, "embedding_dim", DIM)
     monkeypatch.setattr(main.settings, "claim_min_idle_ms", 0)  # 테스트는 즉시 회수
 

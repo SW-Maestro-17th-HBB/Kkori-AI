@@ -17,16 +17,18 @@ from typing import Awaitable, Callable, TypeVar
 
 from psycopg import AsyncConnection
 
-from src.ai import Embedder, Structurer
+from src.ai import Embedder, Enricher, Structurer
 from src.analysis.chunking import chunk_structured_data
 from src.analysis.extraction import is_empty_text
 from src.config import Settings
 from src.contract import AnalysisMode, AnalysisStatus, ParseRequest
 from src.storage.repository import (
+    get_error_message,
     get_parse_status,
     increment_retry_count,
     load_structured_data,
     mark_failed,
+    record_last_error,
     replace_chunks,
     reset_retry_count,
     save_structured_data,
@@ -91,9 +93,11 @@ async def _with_retry(
     for attempt in range(settings.retry_max_attempts):
         try:
             return await thunk()
-        except Exception:
+        except Exception as e:
             await increment_retry_count(conn, resume_id)
             if attempt + 1 >= settings.retry_max_attempts:
+                # 마지막 실패 원인을 기록해 포기(§4) 시 error_message 에 합류시킨다 (best-effort)
+                await record_last_error(conn, resume_id, f"{type(e).__name__}: {e}")
                 raise
             await asyncio.sleep(settings.retry_base_delay_s * (2**attempt))
     raise AssertionError("unreachable")  # for 문은 반드시 return 또는 raise 로 끝난다
@@ -105,6 +109,7 @@ async def process_request(
     conn: AsyncConnection,
     embedder: Embedder,
     structurer: Structurer,
+    enricher: Enricher,
     fetch_text: FetchText,
     publish: PublishStatus,
     settings: Settings,
@@ -121,8 +126,12 @@ async def process_request(
     # ① FAILED 기록 → ② 정상 반환(=XACK). 이 순서 고정 — 중간에 죽어도 재전달본이
     # 같은 경로로 수렴한다(mark_failed 는 멱등, 종결 상태는 덮지 않음).
     if delivery_count >= settings.delivery_count_threshold:
-        msg = f"재전달 임계 초과(delivery count={delivery_count})"
-        await _fail(conn, request.resumeId, request.userId, publish, msg)
+        simple = f"재전달 임계 초과(delivery count={delivery_count})"
+        # DB 에는 기록된 마지막 오류를 합류시켜 원인 추적 가능하게, SSE 는 간단 문구 유지
+        last = await get_error_message(conn, request.resumeId)
+        detail = f"{simple} — 마지막 오류: {last}" if last else simple
+        if await mark_failed(conn, request.resumeId, detail):
+            await publish(request.resumeId, request.userId, AnalysisStatus.FAILED, simple)
         return
 
     status = await get_parse_status(conn, request.resumeId)
@@ -143,7 +152,7 @@ async def process_request(
     if status in (AnalysisStatus.EMBEDDING.value, AnalysisStatus.PARSED.value):
         await _run_embedding_stage(
             request, entry_status=status, conn=conn,
-            embedder=embedder, publish=publish, settings=settings,
+            embedder=embedder, enricher=enricher, publish=publish, settings=settings,
         )
         return
 
@@ -155,7 +164,7 @@ async def process_request(
 
     # FULL — 처음부터 (§2.1). 크래시 재개(PARSING~STRUCTURING)도 원문 미저장이라 처음부터(§3.1).
     await _run_full_pipeline(
-        request, entry_status=status, conn=conn, embedder=embedder,
+        request, entry_status=status, conn=conn, embedder=embedder, enricher=enricher,
         structurer=structurer, fetch_text=fetch_text, publish=publish, settings=settings,
     )
 
@@ -166,6 +175,7 @@ async def _run_full_pipeline(
     entry_status: str,
     conn: AsyncConnection,
     embedder: Embedder,
+    enricher: Enricher,
     structurer: Structurer,
     fetch_text: FetchText,
     publish: PublishStatus,
@@ -195,7 +205,7 @@ async def _run_full_pipeline(
     # 4~5단계: 임베딩 (PARSED 에서 합류 — REINDEX 와 같은 경로)
     await _run_embedding_stage(
         request, entry_status=AnalysisStatus.PARSED.value, conn=conn,
-        embedder=embedder, publish=publish, settings=settings,
+        embedder=embedder, enricher=enricher, publish=publish, settings=settings,
     )
 
 
@@ -271,10 +281,11 @@ async def _run_embedding_stage(
     entry_status: str,
     conn: AsyncConnection,
     embedder: Embedder,
+    enricher: Enricher,
     publish: PublishStatus,
     settings: Settings,
 ) -> None:
-    """청킹 → 임베딩 → 청크 교체 + EMBEDDED 전이(같은 트랜잭션, §2.4) → 이벤트 발행."""
+    """청킹 → 풍부화(§2.6) → 임베딩 → 청크 교체 + EMBEDDED 전이(같은 트랜잭션, §2.4) → 이벤트 발행."""
     rid, uid = request.resumeId, request.userId
 
     # PARSED 에서 왔으면 EMBEDDING 으로 CAS 진입. REINDEX 는 DB 가 이미 EMBEDDING(Spring 세팅)
@@ -299,6 +310,15 @@ async def _run_embedding_stage(
         chunk_version=settings.chunk_version,
     )
 
+    # 풍부화(§2.6): 이력서당 1회 호출로 청크별 topics·relatedConcepts·questionHints 추출
+    async def _enrich():
+        return await asyncio.to_thread(enricher.enrich, [c.content for c in chunks])
+
+    enrichments = (
+        await _with_retry(_enrich, conn=conn, resume_id=rid, settings=settings)
+        if chunks else []
+    )
+
     async def _embed():
         # 임베딩 호출은 blocking — 스레드로 넘겨 이벤트 루프를 막지 않는다
         return await asyncio.to_thread(
@@ -307,19 +327,23 @@ async def _run_embedding_stage(
 
     embeddings = await _with_retry(_embed, conn=conn, resume_id=rid, settings=settings)
 
-    if not await _commit_chunks(conn, rid, chunks, embeddings):
+    if not await _commit_chunks(
+        conn, rid, chunks, embeddings, [e.model_dump() for e in enrichments]
+    ):
         return
     await publish(rid, uid, AnalysisStatus.EMBEDDED, "")
 
 
-async def _commit_chunks(conn: AsyncConnection, rid: int, chunks, embeddings) -> bool:
+async def _commit_chunks(
+    conn: AsyncConnection, rid: int, chunks, embeddings, enrichments=None
+) -> bool:
     """청크 교체 + EMBEDDED 전이를 한 트랜잭션으로 (§2.4 불변식 1, §3.3).
 
     반환 False = 다른 처리자가 먼저 완료 → 롤백(승자의 청크 보존) 후 양보.
     """
     try:
         async with conn.transaction():
-            await replace_chunks(conn, rid, chunks, embeddings)
+            await replace_chunks(conn, rid, chunks, embeddings, enrichments)
             if not await try_transition(
                 conn, rid, AnalysisStatus.EMBEDDING, AnalysisStatus.EMBEDDED
             ):
