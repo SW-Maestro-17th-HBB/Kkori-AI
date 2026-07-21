@@ -247,9 +247,11 @@ at-least-once + XAUTOCLAIM 회수는 **실제로 죽지 않은 원본과 회수�
 - 인증: 단일 IAM 원칙(백엔드 dev/prod S3 IAM Role 패턴과 일치).
 - **로컬 주의**: Bedrock은 로컬 에뮬레이터가 없다(MinIO=S3 로컬과 다름). 실제 제공자를 로컬에서 쓰면 실제 Bedrock
   호출 → AWS 자격증명·리전 필요, 로컬에서도 과금.
-- **리전: 서울(ap-northeast-2) 확정**(2026-07-21 콘솔 확인). Claude Haiku 4.5 는 cross-region 프로파일
-  (`global.anthropic.claude-haiku-4-5-20251001-v1:0`)로만 제공 — 호출은 서울로 받되 **추론은 전 세계 리전으로
-  라우팅될 수 있음**(데이터 국내 상주는 보장되지 않음, 인지하고 수용). Embed v4 는 `cohere.embed-v4:0`.
+- **리전: us-east-1 (조직 정책상 강제)**(2026-07-21 실 호출 탐침으로 확정). 당초 서울(ap-northeast-2)을
+  원했으나, 계정이 소속된 조직(SW마에스트로 발급)의 **SCP 가 Bedrock 호출을 us-east-1 에서만 허용**한다 —
+  서울의 모든 모델·`global.`/`apac.` cross-region 프로파일 전부 명시적 거부(실측). 호출 ID:
+  Claude = `us.anthropic.claude-haiku-4-5-20251001-v1:0`, 임베딩 = `cohere.embed-v4:0`(직접 ID 허용).
+  데이터 국내 상주는 조직 정책상 불가 — 인지하고 수용.
 - **AI 제공자 추상화 (테스트·클라우드 독립)**: 구조화(LLM)·임베딩 호출을 각각 **인터페이스**로 정의하고 구현 2개를 둔다.
   - **가짜(fake) 제공자** — 로컬 개발·단위 테스트용. 클라우드/과금 없이 **결정적 값**을 반환한다(가짜 구조화기 = 정해진
     `StructuredData`, 가짜 임베딩기 = 1024차원 결정적 더미 벡터, 예: 텍스트 해시 기반).
@@ -302,6 +304,7 @@ at-least-once + XAUTOCLAIM 회수는 **실제로 죽지 않은 원본과 회수�
 - 2026-07-16 백엔드 HBB1-232 확정 전달: (1) REINDEX 진입 상태 세팅 `ResumeAnalysisStatus.restartFor` 구현·PR#44 머지 예정,
   (2) AI 모델 = Haiku 4.5 + Cohere v3(둘 다 기반영), (3) 백엔드 `StructuredData` 경로 `dto/`→`domain/`(내용 동일, 워커 무영향),
   (4) `resume_analysis_status` 시각 컬럼 `timestamp`→**`timestamptz`(UTC)** → 워커는 UTC-aware로 기록. → §8.
-- 2026-07-21 Bedrock 리전·모델 확정(콘솔 확인): 리전 **서울(ap-northeast-2)**. Claude 는 **`global.` cross-region
-  프로파일**로만 제공(추론 전 세계 라우팅 인지·수용). 임베딩은 서울에 v3 미제공 → **Embed v4(`cohere.embed-v4:0`)로
-  변경**, 출력 차원 1024 지정으로 `vector(1024)` 스키마 유지. → §8.
+- 2026-07-21 Bedrock 리전·모델 확정: 임베딩은 v3 미제공으로 **Embed v4(`cohere.embed-v4:0`)로 변경**(출력 차원
+  1024 지정, `vector(1024)` 스키마 유지). 리전은 서울로 정했다가 **같은 날 번복 — 조직 SCP 가 us-east-1 만
+  허용**(서울·cross-region 프로파일 전부 명시적 거부, 실 호출 탐침으로 확인) → **us-east-1 확정**.
+  Embed v4 실 호출 검증 완료(1024차원 + 의미 유사도 동작). → §8.

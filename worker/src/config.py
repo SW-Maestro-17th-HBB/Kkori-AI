@@ -42,10 +42,10 @@ class Settings(BaseSettings):
     # "fake" = 가짜(로컬/테스트, 클라우드 없이) / "bedrock" = 실제(클라우드 준비 후)
     ai_provider: str = "fake"
 
-    # --- AWS Bedrock (LLM·임베딩) --- (서울 리전 콘솔에서 확인, 2026-07-21)
-    bedrock_region: str = "ap-northeast-2"
-    # Claude 는 cross-region 프로파일만 제공 — global. 접두사 ID 로 호출 (§8)
-    structuring_model_id: str = "global.anthropic.claude-haiku-4-5-20251001-v1:0"
+    # --- AWS Bedrock (LLM·임베딩) --- (실 호출 탐침으로 확정, 2026-07-21)
+    # 계정이 소속된 조직의 SCP 가 Bedrock 을 us-east-1 에서만 허용한다(서울·global 프로파일 전부 거부).
+    bedrock_region: str = "us-east-1"
+    structuring_model_id: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
     # Embed v4 — 출력 차원을 1024 로 지정해 vector(1024) 스키마를 유지한다 (§8)
     embedding_model_id: str = "cohere.embed-v4:0"
     embedding_dim: int = 1024  # 임베딩 모델의 출력 차원 설정에 종속 — 변경 시 스키마도 조정
