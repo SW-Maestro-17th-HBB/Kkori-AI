@@ -31,14 +31,14 @@ docker build -f worker/Dockerfile -t kkori-worker .
 ## 기술적 결정사항
 
 - **uv workspace 단일 락파일** — 개발은 루트 venv 하나로 하되, 배포는 서비스별 독립 이미지. 각 Dockerfile이 `uv sync --frozen --package <이름>`으로 그 서비스 의존성만 설치하므로 배포 결합 없음. 멤버 pyproject에 build-system을 두지 않아 uv는 의존성만 설치(현행 `src/` 레이아웃 유지)
-- **livekit-agents + LiveKit Inference** — 최종적으로 self-host SFU 예정(ADR-E3-02)이라 STT·LLM·TTS built-in이 없어 직접 연동이 필요하지만, 개발 단계에서는 LiveKit Cloud + Inference를 사용해 별도 프로바이더 API 키 없이 LiveKit 자격증명 하나로 동작. 모델 구성은 `agent/src/main.py` 상단 상수(STT deepgram/nova-3 ko · LLM openai/gpt-4.1-mini · TTS cartesia/sonic-3 · 턴 감지 inference.TurnDetector)로, 교체 시 상수만 변경
-- **자동 디스패치(임시)** — `agent_name` 미지정으로 모든 신규 룸에 에이전트가 자동 입장(테스트 편의). Spring이 `createDispatch(agentName)`로 명시 디스패치하는 방식(ADR-E3-05)은 세션 생성 스토리에서 전환
+- **livekit-agents + LiveKit Inference** — 최종적으로 self-host SFU 예정이라 STT·LLM·TTS built-in이 없어 직접 연동이 필요하지만, 개발 단계에서는 LiveKit Cloud + Inference를 사용해 별도 프로바이더 API 키 없이 LiveKit 자격증명 하나로 동작. 모델 구성은 `agent/src/main.py` 상단 상수로, 교체 시 상수만 변경
+- **자동 디스패치(임시)** — `agent_name` 미지정으로 모든 신규 룸에 에이전트가 자동 입장(테스트 편의). Spring이 `createDispatch(agentName)`로 명시 디스패치하는 방식은 세션 생성 스토리에서 전환
 - **재연결 미처리(현재)** — 참가자 퇴장 시 세션 즉시 종료(기본값). `close_on_disconnect=False` + 재연결 창 처리는 INTERRUPTED 상태 스토리 범위
 
 ## 브랜치 / PR 규칙
 
 - **기본 브랜치는 `develop`** (통합 지점), `main`은 배포 전용
-- 작업은 `feature/HBB1-<지라번호>-<영문 요약>` 브랜치 → develop PR
+- 작업은 `feature/HBB1-<지라번호>-<영문 요약>` 브랜치 → develop PR — 브랜치는 **스토리(상위 이슈)** 키를 사용(Jira 자동 전환이 스토리에 걸림), PR은 구현 단위인 서브 이슈를 `Closes #<이슈번호>`로 연결. 브랜치 키와 PR 이슈 키가 다를 수 있는 게 정상
 - 브랜치 접두사는 축약형이 아닌 전체 단어 사용 (`feat/` ❌ → `feature/` ✅)
 - **PR은 항상 draft로 생성**, 준비되면 ready 전환
 - PR 제목은 `<타입>: [HBB1-<지라번호>] <요약>` 형식 (예: `feat: [HBB1-263] livekit-agents 및 기본 플러그인 연동`) — 지라 키가 제목에 있으면 GitHub for Atlassian이 티켓에 자동 연결
