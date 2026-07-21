@@ -17,4 +17,7 @@ ENV PATH="/app/.venv/bin:$PATH"
 COPY shared/ shared/
 COPY agent/src/ src/
 
+RUN useradd --create-home --uid 10001 appuser
+USER appuser
+
 CMD ["python", "-m", "src.main", "start"]
