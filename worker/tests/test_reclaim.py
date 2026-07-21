@@ -140,3 +140,23 @@ async def test_처리실패시_ACK안함_PEL잔류(conn, redis, wired, monkeypat
 @pytest.mark.asyncio
 async def test_방치메시지_없으면_아무일도_안함(conn, redis, wired):
     assert await main.reclaim_pending_once(redis) == 0
+
+
+@pytest.mark.asyncio
+async def test_형식위반_메시지는_제거하고_나머지는_정상처리(conn, redis, wired):
+    """리뷰 반영: decode 실패 메시지가 배치를 중단시키지 않고, ACK 로 제거되어
+    무한 재회수가 발생하지 않는다. 같은 배치의 정상 메시지는 그대로 처리된다."""
+    # 형식이 틀린 메시지 (mode 가 계약에 없는 값) + 정상 메시지를 함께 PEL 에 넣는다
+    await redis.xadd(STREAM, {"resumeId": "1", "userId": "1", "bucket": "b",
+                              "objectKey": "k", "mode": "WRONG"})
+    rid = await seed_resume(conn, AnalysisStatus.EMBEDDING, SD)
+    await redis.xadd(STREAM, {"resumeId": str(rid), "userId": "1", "bucket": "b",
+                              "objectKey": "k", "mode": "REINDEX"})
+    await redis.xreadgroup(GROUP, "dead-worker", {STREAM: ">"}, count=10)
+    assert await _pending_count(redis) == 2
+
+    processed = await main.reclaim_pending_once(redis)
+
+    assert processed == 1  # 정상 메시지만 처리됨 (형식 위반은 처리 건수에 안 셈)
+    assert await get_parse_status(conn, rid) == "EMBEDDED"  # 배치가 중단되지 않음
+    assert await _pending_count(redis) == 0  # 형식 위반도 ACK 로 제거 → 재회수 없음

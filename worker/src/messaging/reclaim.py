@@ -42,11 +42,20 @@ async def reclaim_pending_once(
 
     processed = 0
     for message_id, fields in messages:
-        request = ParseRequest.decode(decode_fields(fields))
-        delivery_count = await get_delivery_count(
-            redis, settings.consumer_group, message_id
-        )
+        # 형식 검증(decode)은 실패 시 예외를 던진다 — try 안에서 처리해야
+        # 깨진 메시지 하나가 배치 전체를 중단시키지 않는다 (리뷰 반영).
         try:
+            request = ParseRequest.decode(decode_fields(fields))
+        except Exception:
+            # 형식이 틀린 메시지는 재처리도, FAILED 기록도 불가능하다(resumeId 를 못 읽음).
+            # ACK 하지 않으면 매 주기 재회수가 반복되므로, 로그를 남기고 제거한다.
+            logger.exception("형식 위반 메시지 제거 (id=%s, fields=%r)", message_id, fields)
+            await redis.xack(ParseRequest.STREAM_KEY, settings.consumer_group, message_id)
+            continue
+        try:
+            delivery_count = await get_delivery_count(
+                redis, settings.consumer_group, message_id
+            )
             await process(request, delivery_count)
         except Exception:
             logger.exception(
