@@ -240,12 +240,16 @@ at-least-once + XAUTOCLAIM 회수는 **실제로 죽지 않은 원본과 회수�
 - **구조화 LLM: Claude Haiku 4.5 (Bedrock) — 확정.** tool-use/JSON 스키마 강제로 §1.4 StructuredData 형태를 정확히 출력.
   구조화 품질(한국어 파싱)이 부족하면 Sonnet 4.6으로 교체(스키마·DB 영향이 0이라 위험 없는 교체). 프롬프트 캐싱으로
   반복되는 스키마/시스템 프롬프트 입력 비용 절감.
-- **임베딩: Cohere Embed Multilingual v3 (Bedrock, `vector(1024)`) — 확정.** 이력서 RAG의 본질이 **한국어 검색
-  품질**이라 다국어 약한 Titan V2보다 우세. 비용 차(~5배)는 이력서 볼륨에선 무시 가능(1만 건 ~$3). 색인은
-  `input_type=search_document`, 질의 시 `search_query`로 **비대칭 임베딩** 사용.
+- **임베딩: Cohere Embed v4 (Bedrock 서울, `cohere.embed-v4:0`, 출력 차원 1024 지정) — 확정(v3 에서 변경).**
+  이력서 RAG의 본질이 **한국어 검색 품질**이라 다국어 강한 Cohere 계열 유지. 당초 v3 로 확정했으나 서울 리전에
+  v4 만 제공되어 상위 호환인 v4 로 변경(2026-07-21) — **출력 차원을 1024 로 지정**해 `vector(1024)` 스키마는
+  그대로 유지한다. 색인은 `input_type=search_document`, 질의 시 `search_query`로 **비대칭 임베딩** 사용(동일 지원).
 - 인증: 단일 IAM 원칙(백엔드 dev/prod S3 IAM Role 패턴과 일치).
 - **로컬 주의**: Bedrock은 로컬 에뮬레이터가 없다(MinIO=S3 로컬과 다름). 실제 제공자를 로컬에서 쓰면 실제 Bedrock
-  호출 → AWS 자격증명·리전 필요, 로컬에서도 과금. 서울 리전 모델 가용성 제한 가능 → **us-east-1 폴백**을 config에 둠.
+  호출 → AWS 자격증명·리전 필요, 로컬에서도 과금.
+- **리전: 서울(ap-northeast-2) 확정**(2026-07-21 콘솔 확인). Claude Haiku 4.5 는 cross-region 프로파일
+  (`global.anthropic.claude-haiku-4-5-20251001-v1:0`)로만 제공 — 호출은 서울로 받되 **추론은 전 세계 리전으로
+  라우팅될 수 있음**(데이터 국내 상주는 보장되지 않음, 인지하고 수용). Embed v4 는 `cohere.embed-v4:0`.
 - **AI 제공자 추상화 (테스트·클라우드 독립)**: 구조화(LLM)·임베딩 호출을 각각 **인터페이스**로 정의하고 구현 2개를 둔다.
   - **가짜(fake) 제공자** — 로컬 개발·단위 테스트용. 클라우드/과금 없이 **결정적 값**을 반환한다(가짜 구조화기 = 정해진
     `StructuredData`, 가짜 임베딩기 = 1024차원 결정적 더미 벡터, 예: 텍스트 해시 기반).
@@ -298,3 +302,6 @@ at-least-once + XAUTOCLAIM 회수는 **실제로 죽지 않은 원본과 회수�
 - 2026-07-16 백엔드 HBB1-232 확정 전달: (1) REINDEX 진입 상태 세팅 `ResumeAnalysisStatus.restartFor` 구현·PR#44 머지 예정,
   (2) AI 모델 = Haiku 4.5 + Cohere v3(둘 다 기반영), (3) 백엔드 `StructuredData` 경로 `dto/`→`domain/`(내용 동일, 워커 무영향),
   (4) `resume_analysis_status` 시각 컬럼 `timestamp`→**`timestamptz`(UTC)** → 워커는 UTC-aware로 기록. → §8.
+- 2026-07-21 Bedrock 리전·모델 확정(콘솔 확인): 리전 **서울(ap-northeast-2)**. Claude 는 **`global.` cross-region
+  프로파일**로만 제공(추론 전 세계 라우팅 인지·수용). 임베딩은 서울에 v3 미제공 → **Embed v4(`cohere.embed-v4:0`)로
+  변경**, 출력 차원 1024 지정으로 `vector(1024)` 스키마 유지. → §8.

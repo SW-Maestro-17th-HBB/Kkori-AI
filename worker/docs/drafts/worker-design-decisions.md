@@ -146,6 +146,12 @@ XAUTOCLAIM으로 회수·재개할 수 있어야 한다. 이건 Streams 소비�
 
 ## 7. AI 스택: Claude Haiku 4.5 (구조화) + Cohere Embed Multilingual v3 (임베딩)
 
+> **일부 갱신 (2026-07-21)**: 임베딩은 **Embed v4(`cohere.embed-v4:0`)로 변경** — 서울 리전(확정)에 v3 미제공,
+> v4 가 상위 호환(다국어 성능 향상)이며 **출력 차원을 1024 로 지정**할 수 있어 `vector(1024)` 스키마·비대칭
+> 임베딩(search_document/search_query) 모두 유지됨. 아래 "왜 Cohere 계열인가" 근거는 그대로 유효.
+> Claude 는 서울에서 cross-region 프로파일(`global.` 접두사)로만 제공 — 추론이 전 세계로 라우팅될 수 있음을
+> 인지하고 수용(호출 엔드포인트는 서울).
+
 **결정**: 구조화 LLM = **Claude Haiku 4.5(Bedrock)**, 임베딩 = **Cohere Embed Multilingual v3, `vector(1024)`**.
 
 **구조화 LLM — 왜 Haiku**:
