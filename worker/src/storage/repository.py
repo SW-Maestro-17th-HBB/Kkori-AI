@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
 from pgvector import Vector
@@ -25,6 +26,8 @@ from src.analysis.chunking import Chunk
 from src.config import Settings
 from src.contract import AnalysisStatus
 from src.contract.structured_data import StructuredData
+
+logger = logging.getLogger(__name__)
 
 
 def _utcnow() -> datetime:
@@ -148,7 +151,8 @@ async def record_last_error(conn: AsyncConnection, resume_id: int, summary: str)
             (summary[:500], _utcnow(), resume_id),
         )
     except Exception:
-        pass
+        # 기록 실패가 원래 예외 전파를 가리면 안 되므로 삼키되, 흔적은 로그로 남긴다
+        logger.warning("마지막 오류 기록 실패 (resume_id=%s)", resume_id, exc_info=True)
 
 
 async def get_error_message(conn: AsyncConnection, resume_id: int) -> str | None:

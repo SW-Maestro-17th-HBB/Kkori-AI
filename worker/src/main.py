@@ -85,9 +85,11 @@ async def _process(
             is_reclaimed=is_reclaimed,
         )
     except Exception as e:
-        # 예상 밖 예외도 원인 한 줄을 DB 에 남기고(§4 합류용, best-effort) 원래대로 전파한다
+        # 예상 밖 예외도 원인을 DB 에 남기고(§4 합류용, best-effort) 원래대로 전파한다
         # — 전파돼야 ACK 없이 끝나 PEL 재전달(회수)로 이어진다.
-        await record_last_error(conn, request.resumeId, f"{type(e).__name__}: {e}")
+        # DB 에는 예외 타입명만 기록: 원문에는 접속 문자열 등 내부 정보가 섞일 수 있고,
+        # error_message 는 백엔드 조회 API 로 노출될 수 있다. 원문 전체는 로그가 담당.
+        await record_last_error(conn, request.resumeId, type(e).__name__)
         raise
     finally:
         if not injected:

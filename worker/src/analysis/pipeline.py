@@ -96,8 +96,9 @@ async def _with_retry(
         except Exception as e:
             await increment_retry_count(conn, resume_id)
             if attempt + 1 >= settings.retry_max_attempts:
-                # 마지막 실패 원인을 기록해 포기(§4) 시 error_message 에 합류시킨다 (best-effort)
-                await record_last_error(conn, resume_id, f"{type(e).__name__}: {e}")
+                # 마지막 실패 원인을 기록해 포기(§4) 시 error_message 에 합류시킨다 (best-effort).
+                # 예외 타입명만 기록 — 원문에는 내부 정보가 섞일 수 있어 로그가 담당한다.
+                await record_last_error(conn, resume_id, type(e).__name__)
                 raise
             await asyncio.sleep(settings.retry_base_delay_s * (2**attempt))
     raise AssertionError("unreachable")  # for 문은 반드시 return 또는 raise 로 끝난다

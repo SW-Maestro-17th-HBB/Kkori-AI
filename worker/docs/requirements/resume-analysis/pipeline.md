@@ -117,10 +117,12 @@ DB의 `structured_data`(사용자 수정본)를 기준(source of truth)으로 �
   - "Spring은 UPLOADED만 기록" 원칙은 "Spring은 **런의 초기 상태**를 기록"으로 정리됨. UPLOADED 이후의
     파이프라인 전이는 여전히 전부 Worker.
 
-- **계약 위반은 묵인하지 않는다 (cross-check):** mode와 상태가 규약과 어긋나면(예: `mode=REINDEX`인데
-  상태가 `UPLOADED` = structured_data 없음, 또는 `mode=FULL`인데 진입 상태가 `EMBEDDING`) FULL로 진행하면
-  LLM 구조화가 **사용자 수정을 덮어쓰는** 등 데이터 오염이 생긴다. 경고만 남기고 진행하지 말고
-  **`FAILED`로 종결**(error_message에 계약 위반 사유 명시)하여 문제를 명확히 드러낸다.
+- **계약 위반은 묵인하지 않는다 (cross-check):** `mode=REINDEX`인데 상태가 `UPLOADED`~`STRUCTURING`
+  (= structured_data 가 보장되지 않는 이른 상태)이면 재색인할 재료가 없는 계약 위반이다. 경고만 남기고
+  진행하지 말고 **`FAILED`로 종결**(error_message에 계약 위반 사유 명시)하여 문제를 명확히 드러낸다.
+  - 주의: `mode=FULL`인데 상태가 `EMBEDDING`/`PARSED`인 것은 **위반이 아니다** — FULL 런이 해당 단계까지
+    진행한 뒤 ACK 전에 중단되어 같은 메시지가 재전달된 정상 복구 상황이다(§3.1). 상태 라우팅이 mode
+    확인보다 먼저 적용되어 임베딩부터 재개된다.
 
 ### 2.4 재개 불변식 2개 (필수)
 
@@ -322,7 +324,7 @@ at-least-once + XAUTOCLAIM 회수는 **실제로 죽지 않은 원본과 회수�
 
 ## 결정 이력
 
-> 근거·트레이드오프 상세는 `worker/docs/drafts/worker-design-decisions.md`(walkthrough 노트)에 기록. 여기엔 확정 사실만.
+> 근거·트레이드오프 상세는 개인 결정 노트(로컬, 커밋 대상 아님)에 기록. 이 문서에는 확정 사실만 남긴다.
 
 - 2026-07-15 REINDEX 런 진입 상태: Spring이 발행과 같은 트랜잭션에서 세팅(FULL→UPLOADED, REINDEX→EMBEDDING),
   `restartFor()` 구현. → §2.3.
@@ -339,7 +341,8 @@ at-least-once + XAUTOCLAIM 회수는 **실제로 죽지 않은 원본과 회수�
   근거로 채택. 분할은 §2.6 LLM 호출에 통합(경계 판단은 내용 이해가 필요), 짧은 설명은 엔티티=청크 폴백,
   부모 문맥은 source_index→structured_data 조회. `chunk_version = 3`. → §2.5.
 - 2026-07-21 청크 풍부화(enrichment) 도입: **topics·relatedConcepts·questionHints** 를 이력서당 1회 LLM 호출로
-  추출해 metadata 병합(필수 단계, chunk_version 2). 포기 시 error_message 에 **마지막 실패 원인 합류**
+  추출해 metadata 병합(필수 단계). 당시 chunk_version 을 2로 올렸으나 **같은 날 성과 단위 청킹과 함께 3으로
+  대체된 과도기 버전**(v2 청크는 배포 전이라 실데이터 없음). 포기 시 error_message 에 **마지막 실패 원인 합류**
   (DB 상세 / SSE 간단 분리). → §2.6, §4.
 - 2026-07-21 Bedrock 리전·모델 확정: 임베딩은 v3 미제공으로 **Embed v4(`cohere.embed-v4:0`)로 변경**(출력 차원
   1024 지정, `vector(1024)` 스키마 유지). 리전은 서울로 정했다가 **같은 날 번복 — 조직 SCP 가 us-east-1 만

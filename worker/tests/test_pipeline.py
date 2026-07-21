@@ -297,3 +297,14 @@ async def test_포기시_DB엔_마지막오류_합류_SSE는_간단문구(conn):
     db_msg = await get_error_message(conn, rid)
     assert "재전달 임계 초과" in db_msg and "마지막 오류: ConnectionError" in db_msg  # DB 상세
     assert rec.events[-1][3] == "재전달 임계 초과(delivery count=3)"  # SSE 간단 (원인 미포함)
+
+
+@pytest.mark.asyncio
+async def test_FULL재전달이_EMBEDDING상태면_계약위반이_아니라_재개(conn):
+    """리뷰 반영(§2.3 정정): FULL 런이 EMBEDDING 까지 간 뒤 중단되어 같은 메시지가
+    재전달된 경우 — 계약 위반이 아니라 §3.1 재개 표대로 임베딩부터 다시 수행한다."""
+    rid = await seed_resume(conn, AnalysisStatus.EMBEDDING, SD)
+    rec = await _run(conn, rid, mode=AnalysisMode.FULL)
+    assert await get_parse_status(conn, rid) == "EMBEDDED"  # FAILED 아님
+    assert rec.statuses() == ["EMBEDDING", "EMBEDDED"]
+    assert await count_chunks(conn, rid) == 3

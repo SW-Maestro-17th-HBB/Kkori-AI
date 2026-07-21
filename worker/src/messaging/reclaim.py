@@ -57,13 +57,15 @@ async def reclaim_pending_once(
                 redis, settings.consumer_group, message_id
             )
             await process(request, delivery_count)
+            # ACK 도 같은 try 안에서 — 실패해도 이 메시지만 다음 주기로 넘기고
+            # 배치의 나머지 메시지 처리는 계속한다 (멱등이라 재시도 안전).
+            await redis.xack(ParseRequest.STREAM_KEY, settings.consumer_group, message_id)
+            processed += 1
         except Exception:
             logger.exception(
                 "회수 재처리 실패 — 다음 주기에 재시도 (resumeId=%s)", request.resumeId
             )
             continue  # ACK 안 함 → PEL 잔류 → 다음 회수 대상
-        await redis.xack(ParseRequest.STREAM_KEY, settings.consumer_group, message_id)
-        processed += 1
     return processed
 
 
