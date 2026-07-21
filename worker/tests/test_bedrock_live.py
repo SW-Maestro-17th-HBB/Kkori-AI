@@ -89,3 +89,42 @@ def test_embed_v4_차원과_의미유사도_실호출():
     sim_redis, sim_lunch = cos(query, docs[0]), cos(query, docs[1])
     print(f"\n유사도 — Redis 문서: {sim_redis:.3f}, 점심 문서: {sim_lunch:.3f}")
     assert sim_redis > sim_lunch
+
+
+# ---------------------------------------------------------------- 실제 PDF 로 돌리기
+
+RESUME_PDF = os.environ.get("KKORI_LIVE_RESUME_PDF", "")
+
+
+@pytest.mark.skipif(
+    not RESUME_PDF, reason="실제 이력서 PDF 테스트 — KKORI_LIVE_RESUME_PDF=<pdf 경로> 로 실행"
+)
+def test_실제_이력서PDF_추출_구조화_청킹():
+    """아무 이력서 PDF 나 넣어 추출→구조화→청킹을 실제로 돌려본다 (품질 눈검사용).
+
+    실행 예:
+        KKORI_LIVE_BEDROCK=1 KKORI_LIVE_RESUME_PDF="/path/to/이력서.pdf" \
+            pytest worker/tests/test_bedrock_live.py::test_실제_이력서PDF_추출_구조화_청킹 -s
+    """
+    import json
+
+    from src.ai.providers import BedrockStructurer
+    from src.analysis.chunking import approx_tokens, chunk_structured_data
+    from src.analysis.extraction import extract_text, is_empty_text
+
+    pdf = Path(RESUME_PDF).read_bytes()
+    text = extract_text(pdf)
+    assert not is_empty_text(text), "빈 추출 — 이미지 스캔 PDF 인지 확인"
+    print(f"\n[추출] {len(pdf):,} bytes PDF → 텍스트 {len(text):,}자")
+
+    data = BedrockStructurer(_settings()).structure(text)
+    print("\n[구조화 결과]")
+    print(json.dumps(data.model_dump(), ensure_ascii=False, indent=2))
+    assert data.profile.name, "이름을 못 뽑음"
+    assert data.projects or data.experiences, "프로젝트/경력을 하나도 못 뽑음"
+
+    chunks = chunk_structured_data(data)
+    print(f"\n[청킹] {len(chunks)}개")
+    for c in chunks:
+        print(f"  [{c.type.value}] {c.label!r} (~{approx_tokens(c.content)} 토큰)")
+    assert chunks, "청크가 0개"
