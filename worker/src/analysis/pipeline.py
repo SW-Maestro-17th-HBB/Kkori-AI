@@ -248,7 +248,8 @@ async def _structure_stage(
         return False
 
     async def _structure():
-        return structurer.structure(text)
+        # LLM 호출은 blocking — 스레드로 넘겨 이벤트 루프를 막지 않는다
+        return await asyncio.to_thread(structurer.structure, text)
 
     data = await _with_retry(_structure, conn=conn, resume_id=rid, settings=settings)
     try:
@@ -299,7 +300,10 @@ async def _run_embedding_stage(
     )
 
     async def _embed():
-        return embedder.embed_documents([c.content for c in chunks])
+        # 임베딩 호출은 blocking — 스레드로 넘겨 이벤트 루프를 막지 않는다
+        return await asyncio.to_thread(
+            embedder.embed_documents, [c.content for c in chunks]
+        )
 
     embeddings = await _with_retry(_embed, conn=conn, resume_id=rid, settings=settings)
 

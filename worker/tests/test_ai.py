@@ -50,9 +50,20 @@ def test_팩토리_fake_선택():
     assert isinstance(build_embedder(s), Embedder)
 
 
-def test_팩토리_bedrock은_아직_미구현():
+def test_팩토리_bedrock_구현체_반환():
+    """Bedrock 제공자 생성 — 생성 시점엔 AWS 호출이 없어 자격증명 없이도 성립한다."""
+    from src.ai.providers import BedrockEmbedder, BedrockStructurer
+
     s = Settings(ai_provider="bedrock")
-    with pytest.raises(NotImplementedError):
+    assert isinstance(build_structurer(s), BedrockStructurer)
+    embedder = build_embedder(s)
+    assert isinstance(embedder, BedrockEmbedder)
+    assert embedder.dim == s.embedding_dim  # vector(dim) 스키마와 일치
+
+
+def test_팩토리_알수없는_provider_거부():
+    s = Settings(ai_provider="wrong")
+    with pytest.raises(ValueError):
         build_structurer(s)
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(ValueError):
         build_embedder(s)
