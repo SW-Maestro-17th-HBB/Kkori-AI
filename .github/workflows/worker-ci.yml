@@ -45,6 +45,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # 테스트가 PR 코드(및 의존성)를 실행하므로 git 설정에 토큰을 남기지 않는다
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:

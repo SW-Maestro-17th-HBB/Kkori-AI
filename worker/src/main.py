@@ -31,9 +31,14 @@ app = FastStream(broker)
 
 
 class _Resources:
-    """기동 시 준비되는 공유 자원 (DB 커넥션·AI 제공자·S3·회수 루프)."""
+    """기동 시 준비되는 공유 자원 (AI 제공자·S3·회수 루프).
 
-    db = None  # psycopg AsyncConnection
+    DB 는 공유 커넥션을 두지 않는다 — 구독 핸들러와 회수 루프가 동시에 돌 때 한 세션의
+    트랜잭션을 공유하면 서로의 작업을 커밋할 수 있어, **요청당 커넥션**을 연다(§3.3 안전).
+    `db` 는 테스트 주입용(주입되면 그걸 쓰고 닫지 않음). 물량이 늘면 커넥션 풀로 교체.
+    """
+
+    db = None  # 테스트 주입용 psycopg AsyncConnection (프로덕션은 요청당 연결)
     embedder: Embedder | None = None
     structurer: Structurer | None = None
     enricher: Enricher | None = None
@@ -63,10 +68,13 @@ async def _process(
     async def publish(rid: int, uid: int, status: AnalysisStatus, message: str) -> None:
         await publish_status(redis, rid, uid, status, message)
 
+    # 요청당 커넥션 — 공유 세션의 트랜잭션 섞임 방지 (테스트가 주입한 커넥션은 재사용·비소유)
+    injected = _Resources.db is not None
+    conn = _Resources.db if injected else await connect(settings)
     try:
         await process_request(
             request,
-            conn=_Resources.db,
+            conn=conn,
             embedder=_Resources.embedder,
             structurer=_Resources.structurer,
             enricher=_Resources.enricher,
@@ -79,14 +87,20 @@ async def _process(
     except Exception as e:
         # 예상 밖 예외도 원인 한 줄을 DB 에 남기고(§4 합류용, best-effort) 원래대로 전파한다
         # — 전파돼야 ACK 없이 끝나 PEL 재전달(회수)로 이어진다.
-        await record_last_error(_Resources.db, request.resumeId, f"{type(e).__name__}: {e}")
+        await record_last_error(conn, request.resumeId, f"{type(e).__name__}: {e}")
         raise
+    finally:
+        if not injected:
+            await conn.close()
 
 
 @app.on_startup
 async def startup() -> None:
-    _Resources.db = await connect(settings)
-    await ensure_schema(_Resources.db, dim=settings.embedding_dim)
+    schema_conn = await connect(settings)
+    try:
+        await ensure_schema(schema_conn, dim=settings.embedding_dim)
+    finally:
+        await schema_conn.close()
     _Resources.embedder = build_embedder(settings)
     _Resources.structurer = build_structurer(settings)
     _Resources.enricher = build_enricher(settings)
@@ -106,8 +120,6 @@ async def startup() -> None:
 async def shutdown() -> None:
     if _Resources.reclaim_task is not None:
         _Resources.reclaim_task.cancel()
-    if _Resources.db is not None:
-        await _Resources.db.close()
 
 
 @broker.subscriber(

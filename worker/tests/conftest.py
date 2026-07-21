@@ -20,9 +20,13 @@ DIM = 8  # 테스트는 작은 차원으로 충분
 
 
 def postgres_available() -> bool:
+    """Postgres 접속 + pgvector 확장 사용 가능 여부까지 확인 (일반 PG 는 스킵되게)."""
     try:
-        with psycopg.connect(ADMIN_DSN, connect_timeout=2):
-            return True
+        with psycopg.connect(ADMIN_DSN, connect_timeout=2) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM pg_available_extensions WHERE name = 'vector'"
+            ).fetchone()
+            return row is not None
     except Exception:
         return False
 

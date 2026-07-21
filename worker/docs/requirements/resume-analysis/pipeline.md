@@ -144,7 +144,8 @@ DB의 `structured_data`(사용자 수정본)를 기준(source of truth)으로 �
 의미 단위 구조화된 JSON(원문 텍스트는 저장하지 않음, §2.1). 따라서 고정 길이 슬라이딩 윈도우(구조를
 버리는 raw text용 기법)가 아니라 **엔티티 경계를 그대로 청크 경계로 삼는다.**
 
-- **1엔티티 = 1청크**: 프로젝트당 1개, 경력(experience)당 1개, 스킬 카테고리당 1개.
+- **청크 단위**: 프로젝트는 **성과 1개 = 청크 1개**(§2.6 호출이 분리, 짧은 설명은 엔티티=청크 폴백),
+  경력·스킬 카테고리는 엔티티당 1개.
   `profile`(name/email)은 **임베딩 제외** — 면접 질문 소스가 아니라 이력서 식별 metadata일 뿐.
 - **자기완결 content**: 각 청크는 단독으로 읽혀도 뜻이 통하게 라벨을 앞에 붙여 직렬화한다.
   예: `[프로젝트] {name} · 역할 {role}\n{description}\n기술: {techStacks join ', '}`.
@@ -160,8 +161,10 @@ DB의 `structured_data`(사용자 수정본)를 기준(source of truth)으로 �
 
 ### 2.6 청크 풍부화(enrichment) — 확정 (2026-07-21)
 
-청크를 저장하기 전에 **LLM 이 청크들을 읽고 부가 정보를 뽑아 metadata 에 병합**한다. 질문 생성(agent)의
-재료를 색인 시점에 미리 준비하고, 엔티티 청크의 "여러 주제 뭉개짐"(실측)을 보조 검색으로 보완하기 위함.
+**입력은 `structured_data`, 출력은 "성과 분할 + 청크별 부가 정보"** — 이 호출 결과로 청크를 만들고(§2.5),
+부가 정보는 각 청크 metadata 에 병합한다. 질문 생성(agent)의 재료를 색인 시점에 미리 준비하고, 엔티티
+청크의 "여러 주제 뭉개짐"(실측)을 보조 검색으로 보완하기 위함. 배열 길이·순서 검증, 재시도, 멱등성은
+전부 structured_data 의 엔티티 배열 기준이다.
 
 - **필드 3종**: `topics`(주제 명사구) · `relatedConcepts`(기술 개념) · `questionHints`(질문 소재).
   전부 청크에 실제 근거가 있는 것만(지어내기 금지).
@@ -170,7 +173,8 @@ DB의 `structured_data`(사용자 수정본)를 기준(source of truth)으로 �
 - **필수 단계** — 위치는 청킹 직전(EMBEDDING 단계 내부, 새 상태 없음 — 분할 결과가 청크를 결정하므로).
   실패는 구조화와 동일하게 내부 재시도 → 소진 시 전파(재전달 경로). 부분 상태를 만들지 않는다.
 - **임베딩 입력은 content 그대로** — 풍부화 결과를 임베딩에 섞는 것은 효과 불확실로 보류(§10).
-- `metadata.chunk_version = 2` 로 상향(색인 스키마 버전) — v1 청크는 향후 REINDEX 백필 대상 식별 가능.
+- 색인 스키마 버전은 §2.5 와 통일해 **`chunk_version = 3`** 하나만 쓴다(2 는 과도기 버전으로 폐기) —
+  구버전 청크는 REINDEX 백필 대상으로 식별 가능.
 
 ---
 
@@ -287,8 +291,8 @@ at-least-once + XAUTOCLAIM 회수는 **실제로 죽지 않은 원본과 회수�
     제공자만 연결(파이프라인 코드 무변경). 단위 테스트는 가짜로 우리 로직(청킹·상태 전이·재개·저장)을 검증하고,
     **모델 품질·실제 Bedrock 요청 형식**은 클라우드 준비 후 **통합 테스트(실 Bedrock 1회 호출)**로 별도 확인한다.
 - **스키마 소유권**: `resume_chunks` 테이블(`content`, `metadata`, `embedding vector(1024)`) + `CREATE EXTENSION vector`는
-  **Worker가 소유**(유일 writer이자 임베딩 차원의 주인). 차원 1024는 Cohere v3 확정에 종속 — 모델 교체 시 여기만 조정.
-  백엔드는 `resumes`/`structured_data` 소유. 기동 시 멱등 DDL(`IF NOT EXISTS`).
+  **Worker가 소유**(유일 writer이자 임베딩 차원의 주인). 차원 1024는 **임베딩 모델의 출력 차원 설정**(Embed v4,
+  1024 지정)에 종속 — 모델·차원 변경 시 여기만 조정. 백엔드는 `resumes`/`structured_data` 소유. 기동 시 멱등 DDL(`IF NOT EXISTS`).
 - **시각 컬럼은 UTC-aware로 기록**: 백엔드 소유 `resume_analysis_status`의 `started_at`/`completed_at`/`failed_at`은
   **`timestamptz`(UTC)**다(백엔드 HBB1-232 확정). 워커는 타임존 포함 UTC(aware datetime, 예: `datetime.now(timezone.utc)`)로
   기록한다 — naive datetime 금지.

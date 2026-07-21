@@ -113,6 +113,11 @@ def _split_oversized(
     각 조각 앞에 header 를 다시 붙이고, 조각 사이에 overlap_sentences 개 문장을 겹친다.
     tail(기술 목록 등)은 마지막 조각에만 붙인다.
     """
+    # 본문이 비면(설명 없는 엔티티가 header+tail 만으로 초과) 통짜 1청크로 폴백 —
+    # 조각 0개가 되어 엔티티가 조용히 사라지는 유실 방지 (CodeRabbit 지적 반영)
+    if not body_sentences:
+        return ["\n".join(x for x in (header, tail) if x)]
+
     pieces: list[list[str]] = []
     current: list[str] = []
     budget = max(target_tokens - approx_tokens(header), 1)
