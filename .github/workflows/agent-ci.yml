@@ -29,7 +29,7 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync --frozen --package kkori-agent
+        run: uv sync --locked --package kkori-agent
 
       - name: Import check
         run: cd agent && uv run --no-sync python -c "import src.main"
