@@ -1,0 +1,6 @@
+[project]
+name = "kkori-worker"
+version = "0.1.0"
+description = "Kkori AI 비동기 평가 워커"
+requires-python = ">=3.13"
+dependencies = []
