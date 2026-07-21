@@ -136,6 +136,107 @@ def _split_oversized(
     return out
 
 
+# ------------------------------------------------- 성과 단위 청킹 (§2.5 세분화 + §2.6)
+
+def build_chunks(
+    data: "StructuredData",
+    enrichment,
+    *,
+    target_tokens: int = 512,
+    overlap_sentences: int = 1,
+    chunk_version: int = 3,
+) -> tuple[list[Chunk], list[dict]]:
+    """분할+풍부화 결과(ResumeEnrichment)로 청크와 metadata 병합분을 만든다.
+
+    - 프로젝트: LLM 이 분리한 **성과 1개 = 청크 1개** (헤더+소개를 문맥으로 부착).
+      성과 분할이 비어 있으면(짧은 설명·가짜 제공자) 기존 엔티티=청크로 폴백.
+    - 경력·스킬: 기존 엔티티=청크 그대로 + 풍부화만 병합.
+    - 반환: (청크 목록, 청크별 metadata 병합 dict 목록) — 저장 시 replace_chunks 에 전달.
+
+    실측 근거(2026-07-21, 실제 이력서 A/B): 성과 단위가 1·2위 격차 +43%, 성과 문장 정밀 조준.
+    """
+    chunks: list[Chunk] = []
+    extras: list[dict] = []
+
+    def add(chunk: Chunk, extra: dict) -> None:
+        chunks.append(chunk)
+        extras.append(extra)
+
+    for i, p in enumerate(data.projects):
+        if _is_empty_project(p):
+            continue
+        analysis = enrichment.projects[i] if i < len(enrichment.projects) else None
+        header = _project_content(Project(name=p.name, role=p.role))
+        tail = f"기술: {', '.join(p.techStacks)}" if p.techStacks else ""
+
+        if analysis is not None and analysis.achievements:
+            # 성과 단위: 각 성과 = 청크 (헤더 + 소개 + 성과 문장 + 기술)
+            intro = analysis.intro.strip()
+            for j, ach in enumerate(analysis.achievements):
+                parts = [header] + ([intro] if intro else []) + [ach.text]
+                if tail:
+                    parts.append(tail)
+                add(
+                    Chunk(
+                        content="\n".join(parts), type=ChunkType.PROJECT,
+                        source_index=i, label=p.name, chunk_version=chunk_version,
+                    ),
+                    {"achievement_index": j, "topics": ach.topics,
+                     "relatedConcepts": ach.relatedConcepts,
+                     "questionHints": ach.questionHints},
+                )
+        else:
+            # 폴백: 분할이 없으면 기존 엔티티=청크 (초과 길이 분할 규칙 유지)
+            for piece in _entity_pieces(header, p.description, tail,
+                                        target_tokens, overlap_sentences):
+                add(
+                    Chunk(content=piece, type=ChunkType.PROJECT, source_index=i,
+                          label=p.name, chunk_version=chunk_version),
+                    {"topics": [], "relatedConcepts": [], "questionHints": []},
+                )
+
+    for i, e in enumerate(data.experiences):
+        if _is_empty_experience(e):
+            continue
+        enr = enrichment.experiences[i] if i < len(enrichment.experiences) else None
+        header = f"[경력] {e.title}".strip()
+        for piece in _entity_pieces(header, e.description, "", target_tokens, overlap_sentences):
+            add(
+                Chunk(content=piece, type=ChunkType.EXPERIENCE, source_index=i,
+                      label=e.title, chunk_version=chunk_version),
+                _enrichment_extra(enr),
+            )
+
+    for i, sk in enumerate(data.skills):
+        if _is_empty_skill(sk):
+            continue
+        enr = enrichment.skills[i] if i < len(enrichment.skills) else None
+        add(
+            Chunk(content=_skill_content(sk), type=ChunkType.SKILL, source_index=i,
+                  label=sk.category, chunk_version=chunk_version),
+            _enrichment_extra(enr),
+        )
+
+    return chunks, extras
+
+
+def _enrichment_extra(enr) -> dict:
+    if enr is None:
+        return {"topics": [], "relatedConcepts": [], "questionHints": []}
+    return {"topics": enr.topics, "relatedConcepts": enr.relatedConcepts,
+            "questionHints": enr.questionHints}
+
+
+def _entity_pieces(
+    header: str, body: str, tail: str, target_tokens: int, overlap_sentences: int
+) -> list[str]:
+    """엔티티 1개를 content 조각(1개 또는 초과 길이 분할)으로 만든다 — 기존 §2.5 규칙."""
+    whole = "\n".join(x for x in (header, body, tail) if x)
+    if approx_tokens(whole) <= target_tokens:
+        return [whole]
+    return _split_oversized(header, split_sentences(body), tail, target_tokens, overlap_sentences)
+
+
 # ---------------------------------------------------------------- 메인
 
 def chunk_structured_data(

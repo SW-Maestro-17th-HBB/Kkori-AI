@@ -18,7 +18,7 @@ from typing import Awaitable, Callable, TypeVar
 from psycopg import AsyncConnection
 
 from src.ai import Embedder, Enricher, Structurer
-from src.analysis.chunking import chunk_structured_data
+from src.analysis.chunking import build_chunks
 from src.analysis.extraction import is_empty_text
 from src.config import Settings
 from src.contract import AnalysisMode, AnalysisStatus, ParseRequest
@@ -303,20 +303,18 @@ async def _run_embedding_stage(
         await _fail(conn, rid, uid, publish, "계약 위반: EMBEDDING 단계인데 structured_data 없음")
         return
 
-    chunks = chunk_structured_data(
-        data,
+    # 분할+풍부화(§2.5 성과 단위, §2.6): 이력서당 1회 LLM 호출 —
+    # 프로젝트 성과 경계 분리 + 청크별 topics·relatedConcepts·questionHints
+    async def _enrich():
+        return await asyncio.to_thread(enricher.enrich, data)
+
+    enrichment = await _with_retry(_enrich, conn=conn, resume_id=rid, settings=settings)
+
+    chunks, extras = build_chunks(
+        data, enrichment,
         target_tokens=settings.chunk_target_tokens,
         overlap_sentences=settings.chunk_overlap_sentences,
         chunk_version=settings.chunk_version,
-    )
-
-    # 풍부화(§2.6): 이력서당 1회 호출로 청크별 topics·relatedConcepts·questionHints 추출
-    async def _enrich():
-        return await asyncio.to_thread(enricher.enrich, [c.content for c in chunks])
-
-    enrichments = (
-        await _with_retry(_enrich, conn=conn, resume_id=rid, settings=settings)
-        if chunks else []
     )
 
     async def _embed():
@@ -327,9 +325,7 @@ async def _run_embedding_stage(
 
     embeddings = await _with_retry(_embed, conn=conn, resume_id=rid, settings=settings)
 
-    if not await _commit_chunks(
-        conn, rid, chunks, embeddings, [e.model_dump() for e in enrichments]
-    ):
+    if not await _commit_chunks(conn, rid, chunks, embeddings, extras):
         return
     await publish(rid, uid, AnalysisStatus.EMBEDDED, "")
 

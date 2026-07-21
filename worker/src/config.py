@@ -65,7 +65,7 @@ class Settings(BaseSettings):
     # --- 청킹 (§2.5) ---
     chunk_target_tokens: int = 512  # 초과 엔티티만 문장 경계로 분할
     chunk_overlap_sentences: int = 1  # 분할 조각 간 겹침
-    chunk_version: int = 2  # metadata.chunk_version — 색인 스키마 버전 (2 = enrichment 도입)
+    chunk_version: int = 3  # metadata.chunk_version — 색인 스키마 버전 (3 = 성과 단위 청킹+풍부화)
 
     @property
     def resolved_consumer_name(self) -> str:

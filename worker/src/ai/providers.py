@@ -24,11 +24,32 @@ from src.contract.structured_data import StructuredData
 
 
 class ChunkEnrichment(BaseModel):
-    """청크 풍부화 결과 — LLM 이 청크를 읽고 뽑은 부가 정보 (metadata 에 병합됨)."""
+    """청크 풍부화 결과 — LLM 이 내용을 읽고 뽑은 부가 정보 (metadata 에 병합됨)."""
 
-    topics: list[str] = Field(default_factory=list)  # 청크가 다루는 주제
+    topics: list[str] = Field(default_factory=list)  # 다루는 주제
     relatedConcepts: list[str] = Field(default_factory=list)  # 등장·밀접 기술 개념
     questionHints: list[str] = Field(default_factory=list)  # 면접 질문 소재
+
+
+class Achievement(ChunkEnrichment):
+    """프로젝트 성과 1개 — 원문 문장 + 풍부화 (성과 단위 청킹의 재료, §2.5)."""
+
+    text: str  # 성과 문장 (description 원문에서 그대로 분리)
+
+
+class ProjectAnalysis(BaseModel):
+    """프로젝트 1개의 분할 결과 — 소개와 성과 목록."""
+
+    intro: str = ""  # 서비스 소개 부분 (성과 아님 — 각 성과 청크에 문맥으로 부착)
+    achievements: list[Achievement] = Field(default_factory=list)
+
+
+class ResumeEnrichment(BaseModel):
+    """이력서 전체의 분할+풍부화 결과 — 입력 배열과 순서·길이 일치해야 한다."""
+
+    projects: list[ProjectAnalysis] = Field(default_factory=list)
+    experiences: list[ChunkEnrichment] = Field(default_factory=list)
+    skills: list[ChunkEnrichment] = Field(default_factory=list)
 
 
 @runtime_checkable
@@ -53,9 +74,9 @@ class Embedder(Protocol):
 
 @runtime_checkable
 class Enricher(Protocol):
-    """청크 목록 → 청크별 풍부화 정보 (이력서당 1회 호출, 입력 순서·길이 보존)."""
+    """StructuredData → 성과 분할 + 풍부화 (이력서당 1회 호출, 배열 순서·길이 보존)."""
 
-    def enrich(self, chunk_contents: list[str]) -> list[ChunkEnrichment]: ...
+    def enrich(self, data: StructuredData) -> ResumeEnrichment: ...
 
 
 class FakeStructurer:
@@ -95,15 +116,23 @@ class FakeEmbedder:
 
 
 class FakeEnricher:
-    """정해진 풍부화 결과를 반환하는 가짜. 기본은 청크 수만큼 빈 enrichment."""
+    """가짜 풍부화 — 주입된 결과를 반환하거나, 기본은 "분할 없음 + 빈 풍부화".
 
-    def __init__(self, results: list[ChunkEnrichment] | None = None) -> None:
-        self._results = results
+    분할 없음(achievements 빈 배열) → 청킹이 기존 엔티티=청크 방식으로 폴백하므로
+    LLM 없이도 파이프라인이 결정적으로 동작한다.
+    """
 
-    def enrich(self, chunk_contents: list[str]) -> list[ChunkEnrichment]:
-        if self._results is not None:
-            return self._results
-        return [ChunkEnrichment() for _ in chunk_contents]
+    def __init__(self, result: ResumeEnrichment | None = None) -> None:
+        self._result = result
+
+    def enrich(self, data: StructuredData) -> ResumeEnrichment:
+        if self._result is not None:
+            return self._result
+        return ResumeEnrichment(
+            projects=[ProjectAnalysis() for _ in data.projects],
+            experiences=[ChunkEnrichment() for _ in data.experiences],
+            skills=[ChunkEnrichment() for _ in data.skills],
+        )
 
 
 # ---------------------------------------------------------------- Bedrock 구현
@@ -196,29 +225,29 @@ class BedrockEmbedder:
 
 
 _ENRICH_PROMPT = """\
-다음은 한 이력서에서 잘라낸 청크 {count}개다. 각 청크에 대해 면접 질문 생성에 도움이
-되는 부가 정보를 추출해 save_enrichments 도구로 저장하라.
+다음은 구조화된 이력서다. 성과 단위 청킹과 면접 질문 생성을 위한 분석을
+save_enrichment 도구로 저장하라.
 
-각 청크마다:
-- topics: 청크가 다루는 주제 (2~5개, 짧은 한국어 명사구. 예: "성능 최적화", "인증")
-- relatedConcepts: 청크에 등장하거나 밀접한 기술 개념 (구체적인 기술·패턴 이름 그대로)
-- questionHints: 이 청크로 만들 수 있는 면접 질문 소재 (2~4개, 짧은 구)
+## 프로젝트 ({project_count}개) — 각각에 대해:
+- intro: description 에서 "서비스가 무엇인지" 소개하는 앞부분 (성과가 아닌 부분)
+- achievements: 나머지를 **개별 성과 단위로 분리** — 각 성과의 text 는 description 의
+  문장을 **그대로 옮긴다**(수정·요약 금지). 성과마다 topics(주제 명사구 1~3개),
+  relatedConcepts(등장 기술·패턴 이름 그대로), questionHints(면접 질문 소재 1~3개)를 뽑는다.
+
+## 경력 ({experience_count}개), 스킬 ({skill_count}개) — 각각에 대해:
+- topics / relatedConcepts / questionHints 만 뽑는다 (분할 없음).
 
 규칙:
-- 청크에 실제 근거가 있는 것만 뽑는다. 지어내지 않는다.
-- enrichments 배열의 순서와 길이는 입력 청크와 정확히 같아야 한다 ({count}개).
+- 실제 근거가 있는 것만. 지어내지 않는다. 근거 없으면 빈 배열.
+- projects / experiences / skills 배열의 순서와 길이는 입력과 정확히 같아야 한다.
 
-청크 목록:
-{chunks}
+## 입력
+{payload}
 """
 
 
-class _EnrichmentResult(BaseModel):
-    enrichments: list[ChunkEnrichment]
-
-
 class BedrockEnricher:
-    """Claude(Bedrock) 풍부화 — 이력서당 1회 호출로 전 청크의 부가 정보를 뽑는다."""
+    """Claude(Bedrock) 분할+풍부화 — 이력서당 1회 호출 (§2.5 성과 단위, §2.6)."""
 
     def __init__(self, settings: Settings) -> None:
         from anthropic import AnthropicBedrock
@@ -226,36 +255,58 @@ class BedrockEnricher:
         self._client = AnthropicBedrock(aws_region=settings.bedrock_region)
         self._model_id = settings.structuring_model_id  # 구조화와 같은 모델 사용
 
-    def enrich(self, chunk_contents: list[str]) -> list[ChunkEnrichment]:
-        if not chunk_contents:
-            return []
-        listing = "\n\n".join(
-            f"--- 청크 {i} ---\n{content}" for i, content in enumerate(chunk_contents, 1)
+    def enrich(self, data: StructuredData) -> ResumeEnrichment:
+        payload = json.dumps(
+            {
+                "projects": [
+                    {"name": p.name, "role": p.role, "description": p.description}
+                    for p in data.projects
+                ],
+                "experiences": [
+                    {"title": e.title, "description": e.description}
+                    for e in data.experiences
+                ],
+                "skills": [
+                    {"category": sk.category, "items": sk.items} for sk in data.skills
+                ],
+            },
+            ensure_ascii=False,
         )
         tool = {
-            "name": "save_enrichments",
-            "description": "청크별 풍부화 정보를 저장한다.",
-            "input_schema": _EnrichmentResult.model_json_schema(),
+            "name": "save_enrichment",
+            "description": "이력서의 성과 분할과 풍부화 결과를 저장한다.",
+            "input_schema": ResumeEnrichment.model_json_schema(),
         }
         message = self._client.messages.create(
             model=self._model_id,
-            max_tokens=4096,
+            max_tokens=8192,
             tools=[tool],
-            tool_choice={"type": "tool", "name": "save_enrichments"},
+            tool_choice={"type": "tool", "name": "save_enrichment"},
             messages=[{
                 "role": "user",
-                "content": _ENRICH_PROMPT.format(count=len(chunk_contents), chunks=listing),
+                "content": _ENRICH_PROMPT.format(
+                    project_count=len(data.projects),
+                    experience_count=len(data.experiences),
+                    skill_count=len(data.skills),
+                    payload=payload,
+                ),
             }],
         )
         for block in message.content:
             if block.type == "tool_use":
-                result = _EnrichmentResult.model_validate(block.input)
-                if len(result.enrichments) != len(chunk_contents):
+                result = ResumeEnrichment.model_validate(block.input)
+                if (
+                    len(result.projects) != len(data.projects)
+                    or len(result.experiences) != len(data.experiences)
+                    or len(result.skills) != len(data.skills)
+                ):
                     raise ValueError(
-                        f"풍부화 개수 불일치: 청크 {len(chunk_contents)}개 ≠ "
-                        f"결과 {len(result.enrichments)}개"
+                        "풍부화 배열 길이 불일치: "
+                        f"projects {len(result.projects)}/{len(data.projects)}, "
+                        f"experiences {len(result.experiences)}/{len(data.experiences)}, "
+                        f"skills {len(result.skills)}/{len(data.skills)}"
                     )
-                return result.enrichments
+                return result
         raise ValueError("풍부화 응답에 tool_use 블록이 없음")
 
 

@@ -233,33 +233,55 @@ async def test_포기규칙_이미_EMBEDDED면_덮지않음(conn):
 
 
 @pytest.mark.asyncio
-async def test_풍부화_결과가_metadata에_병합됨(conn):
-    """§2.6: enricher 가 뽑은 topics·questionHints 가 청크 metadata 에 저장된다."""
-    from src.ai import ChunkEnrichment
+async def test_성과단위_분할과_풍부화가_metadata에_반영됨(conn):
+    """§2.5 세분화 + §2.6: 성과 1개 = 청크 1개, topics·questionHints 가 metadata 에 저장."""
+    from src.ai import Achievement, ChunkEnrichment, ProjectAnalysis, ResumeEnrichment
 
     rid = await seed_resume(conn, AnalysisStatus.EMBEDDING, SD)
-    enrichments = [  # SD 는 청크 3개(프로젝트1·경력1·스킬1)를 만든다
-        ChunkEnrichment(topics=["비동기 처리"], relatedConcepts=["Redis Stream"],
-                        questionHints=["도입 이유"]),
-        ChunkEnrichment(topics=["실무 경험"]),
-        ChunkEnrichment(),
-    ]
+    enrichment = ResumeEnrichment(
+        projects=[ProjectAnalysis(
+            intro="주문 서비스 소개.",
+            achievements=[
+                Achievement(text="Redis Stream 도입.", topics=["비동기 처리"],
+                            relatedConcepts=["Redis Stream"], questionHints=["도입 이유"]),
+                Achievement(text="처리량 3배 개선.", topics=["성능"]),
+            ],
+        )],
+        experiences=[ChunkEnrichment(topics=["실무 경험"])],
+        skills=[ChunkEnrichment()],
+    )
     rec = Recorder()
     await process_request(
         _request(rid), conn=conn, embedder=FakeEmbedder(dim=DIM),
-        structurer=FakeStructurer(), enricher=FakeEnricher(enrichments),
+        structurer=FakeStructurer(), enricher=FakeEnricher(enrichment),
         fetch_text=_fetch_text(), publish=rec, settings=Settings(embedding_dim=DIM),
     )
     assert await get_parse_status(conn, rid) == "EMBEDDED"
     cur = await conn.execute(
-        "SELECT metadata FROM resume_chunks WHERE resume_id = %s ORDER BY id", (rid,))
-    metas = [row["metadata"] for row in await cur.fetchall()]
-    assert metas[0]["topics"] == ["비동기 처리"]
-    assert metas[0]["relatedConcepts"] == ["Redis Stream"]
-    assert metas[0]["questionHints"] == ["도입 이유"]
-    assert metas[1]["topics"] == ["실무 경험"]
-    assert metas[2]["topics"] == []  # 빈 풍부화도 키는 존재 (부분 상태 없음)
-    assert all(m["chunk_version"] == 2 for m in metas)  # 색인 스키마 v2
+        "SELECT content, metadata FROM resume_chunks WHERE resume_id = %s ORDER BY id", (rid,))
+    rows = await cur.fetchall()
+    # 프로젝트1(성과2) + 경력1 + 스킬1 = 4청크 (성과 단위로 늘어남)
+    assert len(rows) == 4
+    m0 = rows[0]["metadata"]
+    assert m0["achievement_index"] == 0 and m0["topics"] == ["비동기 처리"]
+    assert m0["relatedConcepts"] == ["Redis Stream"] and m0["questionHints"] == ["도입 이유"]
+    # 성과 청크 content = 헤더 + 소개 + 성과 문장 (자기완결)
+    assert "[프로젝트] 주문 시스템" in rows[0]["content"]
+    assert "주문 서비스 소개." in rows[0]["content"]
+    assert "Redis Stream 도입." in rows[0]["content"]
+    assert rows[1]["metadata"]["achievement_index"] == 1
+    assert rows[2]["metadata"]["topics"] == ["실무 경험"]  # 경력
+    assert rows[3]["metadata"]["topics"] == []  # 스킬 (빈 풍부화도 키 존재)
+    assert all(r["metadata"]["chunk_version"] == 3 for r in rows)  # 색인 스키마 v3
+
+
+@pytest.mark.asyncio
+async def test_분할없으면_엔티티청크_폴백(conn):
+    """성과 분할이 비어 있으면(짧은 설명·가짜 기본값) 기존 엔티티=청크로 동작."""
+    rid = await seed_resume(conn, AnalysisStatus.EMBEDDING, SD)
+    rec = await _run(conn, rid)  # FakeEnricher() 기본 = 분할 없음
+    assert await get_parse_status(conn, rid) == "EMBEDDED"
+    assert await count_chunks(conn, rid) == 3  # 기존과 동일 (프로젝트1+경력1+스킬1)
 
 
 @pytest.mark.asyncio
