@@ -23,6 +23,9 @@ build/
 dist/
 *.egg-info/
 
+# 보존용 문서
+docs/drafts/
+
 # 타입체커 / 린터 캐시
 .mypy_cache/
 .ruff_cache/
