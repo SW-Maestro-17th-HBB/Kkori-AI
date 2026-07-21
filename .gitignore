@@ -31,3 +31,6 @@ dist/
 .idea/
 .vscode/
 .DS_Store
+
+# 개인 초안·학습 노트 (백엔드 관례와 동일 — 커밋 금지, 참조 대상 아님)
+**/docs/drafts/

@@ -1,0 +1,32 @@
+[project]
+name = "kkori-worker"
+version = "0.1.0"
+description = "Kkori 이력서 분석 워커 — FastStream(Redis) + Bedrock(Claude·Cohere) + pgvector"
+requires-python = ">=3.13"
+dependencies = [
+    # 메시지 소비/발행 (Redis Stream consumer group)
+    "faststream[redis]",
+    # AWS: S3/MinIO 다운로드 + Bedrock(Cohere 임베딩)
+    "boto3",
+    # Claude(Bedrock) 구조화·풍부화 호출
+    "anthropic[bedrock]",
+    # PDF 텍스트 추출
+    "pymupdf",
+    # PostgreSQL 직접 기록 + pgvector 타입
+    "psycopg[binary]",
+    "pgvector",
+    # 계약/설정 모델
+    "pydantic",
+    "pydantic-settings",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+]
+
+[tool.uv]
+# 이 프로젝트 자체를 패키지로 빌드하지 않는다 — 의존성 관리 전용
+# (코드는 Docker 에서 src/ 로 복사되고, 로컬은 conftest 가 경로를 잡는다)
+package = false

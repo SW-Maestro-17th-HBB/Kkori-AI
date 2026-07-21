@@ -21,7 +21,7 @@ Worker는 Spring 백엔드가 발행한 이력서 분석 요청을 Redis Stream�
    └─ SSE로 프론트에 실시간 push
 ```
 
-- 스택: **FastStream(Redis 브로커) + uv + Python 3.12**
+- 스택: **FastStream(Redis 브로커) + uv(잠금 uv.lock) + Python 3.13**
 - 연동 인프라: Redis 스트림 2개, PostgreSQL(pgvector), S3/MinIO, AWS Bedrock(LLM·임베딩)
 - 불변 원칙: **모든 분석 요청은 반드시 `EMBEDDED` 또는 `FAILED`로 종결한다.**
 
@@ -130,13 +130,22 @@ DB의 `structured_data`(사용자 수정본)를 기준(source of truth)으로 �
    리셋하지만 **이전 런의 `structured_data`는 DB에 남아 있다.** 산출물을 보고 "임베딩부터"로 판단하면
    **낡은 데이터로 색인하는 버그**. 항상 상태 컬럼만 본다.
 
-### 2.5 청킹 전략 — 엔티티 기반 + 오버플로 분할 (확정)
+### 2.5 청킹 전략 — 성과 단위 세분화 (2026-07-21 갱신)
+
+> **갱신**: 엔티티(프로젝트)=청크에서 **성과 단위 청킹**으로 세분화. 실제 이력서 A/B 실험에서
+> 프로젝트 하나에 성과 여러 개가 뭉치면 임베딩이 평균으로 뭉개져 검색 변별력이 떨어짐을 확인
+> (1·2위 격차: 엔티티 0.049 vs 성과 단위 0.070, +43%). 프로젝트 description 을 **LLM(§2.6 호출에
+> 통합)이 소개/성과로 분리**하고, **성과 1개 = 청크 1개**(헤더+소개를 문맥으로 부착)로 만든다.
+> 분할이 비면(짧은 설명) 기존 엔티티=청크로 폴백. 경력·스킬은 기존 방식 유지.
+> 전체 프로젝트 문맥이 필요하면 `metadata.source_index` 로 `structured_data` 원문을 조회한다
+> (계층형 저장 없이 부모 문맥 확보). `chunk_version = 3`.
 
 청킹 입력은 **raw text가 아니라 `structured_data`**다 — 이미 profile/skills[]/projects[]/experiences[]로
 의미 단위 구조화된 JSON(원문 텍스트는 저장하지 않음, §2.1). 따라서 고정 길이 슬라이딩 윈도우(구조를
 버리는 raw text용 기법)가 아니라 **엔티티 경계를 그대로 청크 경계로 삼는다.**
 
-- **1엔티티 = 1청크**: 프로젝트당 1개, 경력(experience)당 1개, 스킬 카테고리당 1개.
+- **청크 단위**: 프로젝트는 **성과 1개 = 청크 1개**(§2.6 호출이 분리, 짧은 설명은 엔티티=청크 폴백),
+  경력·스킬 카테고리는 엔티티당 1개.
   `profile`(name/email)은 **임베딩 제외** — 면접 질문 소스가 아니라 이력서 식별 metadata일 뿐.
 - **자기완결 content**: 각 청크는 단독으로 읽혀도 뜻이 통하게 라벨을 앞에 붙여 직렬화한다.
   예: `[프로젝트] {name} · 역할 {role}\n{description}\n기술: {techStacks join ', '}`.
@@ -149,6 +158,23 @@ DB의 `structured_data`(사용자 수정본)를 기준(source of truth)으로 �
 - **교체 가능성**: 청킹은 순수 Worker 내부 로직이라 계약·임베딩 차원을 건드리지 않는다. 전략을 바꾸면
   **REINDEX 한 바퀴로 백필**(구버전 `chunk_version` 대상)하면 되고 DDL 마이그레이션이 없다 — 그래서 첫 버전을
   과튜닝하지 않는다. 검색 품질을 실측하며 파라미터(목표 크기·오버랩)나 계층형(parent-child)으로 승급.
+
+### 2.6 청크 풍부화(enrichment) — 확정 (2026-07-21)
+
+**입력은 `structured_data`, 출력은 "성과 분할 + 청크별 부가 정보"** — 이 호출 결과로 청크를 만들고(§2.5),
+부가 정보는 각 청크 metadata 에 병합한다. 질문 생성(agent)의 재료를 색인 시점에 미리 준비하고, 엔티티
+청크의 "여러 주제 뭉개짐"(실측)을 보조 검색으로 보완하기 위함. 배열 길이·순서 검증, 재시도, 멱등성은
+전부 structured_data 의 엔티티 배열 기준이다.
+
+- **필드 3종**: `topics`(주제 명사구) · `relatedConcepts`(기술 개념) · `questionHints`(질문 소재).
+  전부 청크에 실제 근거가 있는 것만(지어내기 금지).
+- **호출 단위: 이력서당 1회** — 구조화 데이터 전체를 한 프롬프트에 넣어 **성과 분할(§2.5)과 풍부화를
+  한 번에** 수행(호출 수 절약 + 표기 일관). 배열 길이·순서가 입력과 다르면 오류로 취급(재시도 대상).
+- **필수 단계** — 위치는 청킹 직전(EMBEDDING 단계 내부, 새 상태 없음 — 분할 결과가 청크를 결정하므로).
+  실패는 구조화와 동일하게 내부 재시도 → 소진 시 전파(재전달 경로). 부분 상태를 만들지 않는다.
+- **임베딩 입력은 content 그대로** — 풍부화 결과를 임베딩에 섞는 것은 효과 불확실로 보류(§10).
+- 색인 스키마 버전은 §2.5 와 통일해 **`chunk_version = 3`** 하나만 쓴다(2 는 과도기 버전으로 폐기) —
+  구버전 청크는 REINDEX 백필 대상으로 식별 가능.
 
 ---
 
@@ -192,10 +218,15 @@ at-least-once + XAUTOCLAIM 회수는 **실제로 죽지 않은 원본과 회수�
 
 메시지 수신·회수 **직후, 처리 시작 전**에 delivery count를 확인한다. 임계(기본 **3**) 이상이면 재처리 없이:
 
-1. DB에 **`FAILED` 기록** (`error_message` = `"재전달 임계 초과"` + 당시 count) → `failed_at` 기록
+1. DB에 **`FAILED` 기록** → `failed_at` 기록. `error_message` 는 `"재전달 임계 초과(delivery count=N)"` 에
+   **기록된 마지막 실패 원인을 덧붙인다**(아래 원인 기록 참조) — 운영·디버깅용.
 2. **XACK**
 
 - **이 순서 고정.** 중간에 죽어도 재전달받은 쪽이 같은 경로를 다시 타면 수렴한다(①은 멱등 — 이미 FAILED면 그대로).
+- **실패 원인 기록**: 내부 재시도 소진 시(§6)와 예상 밖 예외 시, 마지막 오류 요약을 `error_message` 에
+  **best-effort 로 기록**해 둔다(상태는 유지). 포기 시점에 이 기록을 합류시켜 DB 에서 원인 추적이 가능하다.
+  단 **상태 이벤트(SSE)의 message 는 간단 문구만** — 내부 예외 문구를 사용자 화면에 노출하지 않는다.
+  DB 자체가 죽은 경우는 기록 불가(원리적 한계) — 워커 로그가 담당.
 - `FAILED`는 Worker가 내부 재시도를 소진했거나 재전달 임계를 초과한 **끝 상태**다. 서버는 자동 재시도하지
   않으며, 복구는 항상 사용자의 §재분석 API가 유일 경로.
 
@@ -240,15 +271,31 @@ at-least-once + XAUTOCLAIM 회수는 **실제로 죽지 않은 원본과 회수�
 - **구조화 LLM: Claude Haiku 4.5 (Bedrock) — 확정.** tool-use/JSON 스키마 강제로 §1.4 StructuredData 형태를 정확히 출력.
   구조화 품질(한국어 파싱)이 부족하면 Sonnet 4.6으로 교체(스키마·DB 영향이 0이라 위험 없는 교체). 프롬프트 캐싱으로
   반복되는 스키마/시스템 프롬프트 입력 비용 절감.
-- **임베딩: Cohere Embed Multilingual v3 (Bedrock, `vector(1024)`) — 확정.** 이력서 RAG의 본질이 **한국어 검색
-  품질**이라 다국어 약한 Titan V2보다 우세. 비용 차(~5배)는 이력서 볼륨에선 무시 가능(1만 건 ~$3). 색인은
-  `input_type=search_document`, 질의 시 `search_query`로 **비대칭 임베딩** 사용.
+- **임베딩: Cohere Embed v4 (Bedrock 서울, `cohere.embed-v4:0`, 출력 차원 1024 지정) — 확정(v3 에서 변경).**
+  이력서 RAG의 본질이 **한국어 검색 품질**이라 다국어 강한 Cohere 계열 유지. 당초 v3 로 확정했으나 서울 리전에
+  v4 만 제공되어 상위 호환인 v4 로 변경(2026-07-21) — **출력 차원을 1024 로 지정**해 `vector(1024)` 스키마는
+  그대로 유지한다. 색인은 `input_type=search_document`, 질의 시 `search_query`로 **비대칭 임베딩** 사용(동일 지원).
 - 인증: 단일 IAM 원칙(백엔드 dev/prod S3 IAM Role 패턴과 일치).
-- **로컬 주의**: Bedrock은 로컬 에뮬레이터가 없다(MinIO=S3 로컬과 다름). 로컬 워커도 실제 Bedrock 호출 →
-  AWS 자격증명·리전 필요, 로컬에서도 과금. 서울 리전 모델 가용성 제한 가능 → **us-east-1 폴백**을 config에 둠.
+- **로컬 주의**: Bedrock은 로컬 에뮬레이터가 없다(MinIO=S3 로컬과 다름). 실제 제공자를 로컬에서 쓰면 실제 Bedrock
+  호출 → AWS 자격증명·리전 필요, 로컬에서도 과금.
+- **리전: us-east-1 (조직 정책상 강제)**(2026-07-21 실 호출 탐침으로 확정). 당초 서울(ap-northeast-2)을
+  원했으나, 계정이 소속된 조직(SW마에스트로 발급)의 **SCP 가 Bedrock 호출을 us-east-1 에서만 허용**한다 —
+  서울의 모든 모델·`global.`/`apac.` cross-region 프로파일 전부 명시적 거부(실측). 호출 ID:
+  Claude = `us.anthropic.claude-haiku-4-5-20251001-v1:0`, 임베딩 = `cohere.embed-v4:0`(직접 ID 허용).
+  데이터 국내 상주는 조직 정책상 불가 — 인지하고 수용.
+- **AI 제공자 추상화 (테스트·클라우드 독립)**: 구조화(LLM)·임베딩 호출을 각각 **인터페이스**로 정의하고 구현 2개를 둔다.
+  - **가짜(fake) 제공자** — 로컬 개발·단위 테스트용. 클라우드/과금 없이 **결정적 값**을 반환한다(가짜 구조화기 = 정해진
+    `StructuredData`, 가짜 임베딩기 = 1024차원 결정적 더미 벡터, 예: 텍스트 해시 기반).
+  - **실제 Bedrock 제공자** — 실서버·통합 검증용. 클라우드 준비 후 연결.
+  - 파이프라인 로직은 **인터페이스에만 의존** → Bedrock 없이 파이프라인 전체를 개발·테스트하고, 준비되면 설정으로 실제
+    제공자만 연결(파이프라인 코드 무변경). 단위 테스트는 가짜로 우리 로직(청킹·상태 전이·재개·저장)을 검증하고,
+    **모델 품질·실제 Bedrock 요청 형식**은 클라우드 준비 후 **통합 테스트(실 Bedrock 1회 호출)**로 별도 확인한다.
 - **스키마 소유권**: `resume_chunks` 테이블(`content`, `metadata`, `embedding vector(1024)`) + `CREATE EXTENSION vector`는
-  **Worker가 소유**(유일 writer이자 임베딩 차원의 주인). 차원 1024는 Cohere v3 확정에 종속 — 모델 교체 시 여기만 조정.
-  백엔드는 `resumes`/`structured_data` 소유. 기동 시 멱등 DDL(`IF NOT EXISTS`).
+  **Worker가 소유**(유일 writer이자 임베딩 차원의 주인). 차원 1024는 **임베딩 모델의 출력 차원 설정**(Embed v4,
+  1024 지정)에 종속 — 모델·차원 변경 시 여기만 조정. 백엔드는 `resumes`/`structured_data` 소유. 기동 시 멱등 DDL(`IF NOT EXISTS`).
+- **시각 컬럼은 UTC-aware로 기록**: 백엔드 소유 `resume_analysis_status`의 `started_at`/`completed_at`/`failed_at`은
+  **`timestamptz`(UTC)**다(백엔드 HBB1-232 확정). 워커는 타임존 포함 UTC(aware datetime, 예: `datetime.now(timezone.utc)`)로
+  기록한다 — naive datetime 금지.
 
 ---
 
@@ -285,3 +332,16 @@ at-least-once + XAUTOCLAIM 회수는 **실제로 죽지 않은 원본과 회수�
   `chunk_version` metadata로 향후 교체 시 REINDEX 백필. 근거·대안 비교 → §2.5 및 drafts 노트.
 - 2026-07-16 이미지-only(스캔) PDF: OCR **추후 지원**. 현재는 **빈 텍스트 추출 → `FAILED`**로 명확히 실패 처리
   ("0청크 EMBEDDED"와의 혼동 방지). → §2.1, §10.
+- 2026-07-16 백엔드 HBB1-232 확정 전달: (1) REINDEX 진입 상태 세팅 `ResumeAnalysisStatus.restartFor` 구현·PR#44 머지 예정,
+  (2) AI 모델 = Haiku 4.5 + Cohere v3(둘 다 기반영), (3) 백엔드 `StructuredData` 경로 `dto/`→`domain/`(내용 동일, 워커 무영향),
+  (4) `resume_analysis_status` 시각 컬럼 `timestamp`→**`timestamptz`(UTC)** → 워커는 UTC-aware로 기록. → §8.
+- 2026-07-21 청킹 세분화: **성과 단위 청킹 확정** — 실제 이력서 A/B 실험(격차 +43%, 성과 문장 정밀 조준)을
+  근거로 채택. 분할은 §2.6 LLM 호출에 통합(경계 판단은 내용 이해가 필요), 짧은 설명은 엔티티=청크 폴백,
+  부모 문맥은 source_index→structured_data 조회. `chunk_version = 3`. → §2.5.
+- 2026-07-21 청크 풍부화(enrichment) 도입: **topics·relatedConcepts·questionHints** 를 이력서당 1회 LLM 호출로
+  추출해 metadata 병합(필수 단계, chunk_version 2). 포기 시 error_message 에 **마지막 실패 원인 합류**
+  (DB 상세 / SSE 간단 분리). → §2.6, §4.
+- 2026-07-21 Bedrock 리전·모델 확정: 임베딩은 v3 미제공으로 **Embed v4(`cohere.embed-v4:0`)로 변경**(출력 차원
+  1024 지정, `vector(1024)` 스키마 유지). 리전은 서울로 정했다가 **같은 날 번복 — 조직 SCP 가 us-east-1 만
+  허용**(서울·cross-region 프로파일 전부 명시적 거부, 실 호출 탐침으로 확인) → **us-east-1 확정**.
+  Embed v4 실 호출 검증 완료(1024차원 + 의미 유사도 동작). → §8.
