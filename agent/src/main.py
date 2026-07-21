@@ -10,6 +10,7 @@ STT_LANGUAGE = "ko"
 LLM_MODEL = "openai/gpt-4.1-mini"
 TTS_MODEL = "cartesia/sonic-3"
 TTS_VOICE = "9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"
+TTS_LANGUAGE = "ko"
 
 
 class InterviewerAgent(Agent):
@@ -31,7 +32,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     session = AgentSession(
         stt=inference.STT(model=STT_MODEL, language=STT_LANGUAGE),
         llm=inference.LLM(model=LLM_MODEL),
-        tts=inference.TTS(model=TTS_MODEL, voice=TTS_VOICE),
+        tts=inference.TTS(model=TTS_MODEL, voice=TTS_VOICE, language=TTS_LANGUAGE),
         turn_handling=TurnHandlingOptions(turn_detection=inference.TurnDetector()),
     )
     await session.start(room=ctx.room, agent=InterviewerAgent())
