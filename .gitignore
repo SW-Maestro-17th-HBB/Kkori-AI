@@ -23,9 +23,6 @@ build/
 dist/
 *.egg-info/
 
-# 보존용 문서
-docs/drafts/
-
 # 타입체커 / 린터 캐시
 .mypy_cache/
 .ruff_cache/
@@ -37,3 +34,6 @@ docs/drafts/
 
 # Claude Code 로컬 설정
 .claude
+
+# 개인 초안·학습 노트 (백엔드 관례와 동일 — 커밋 금지, 참조 대상 아님)
+**/docs/drafts/
