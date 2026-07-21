@@ -101,7 +101,6 @@ knowledge_base:
     enabled: true
     filePatterns:
       - worker/docs/requirements/**/*.md
-      - worker/docs/drafts/*.md
       - agent/docs/**/*.md
   # 학습·이슈·PR 참조 범위는 현재 레포지토리로 한정합니다.
   learnings:
