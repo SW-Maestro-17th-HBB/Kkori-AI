@@ -4,7 +4,8 @@ from dotenv import load_dotenv
 from livekit import agents
 from livekit.agents import Agent, AgentServer, AgentSession, TurnHandlingOptions, inference
 
-from src.interview.prompts import INTERVIEWER_INSTRUCTIONS, initial_question_instructions
+from src.interview.initial_question import initial_utterance, select_initial_question
+from src.interview.prompts import INTERVIEWER_INSTRUCTIONS
 from src.session_context import parse_job_metadata
 
 load_dotenv()
@@ -28,15 +29,19 @@ server = AgentServer()
 
 @server.rtc_session()
 async def entrypoint(ctx: agents.JobContext) -> None:
-    session_context = parse_job_metadata(ctx.job.metadata)
+    if ctx.job.metadata:
+        session_context = parse_job_metadata(ctx.job.metadata)
+        position = session_context.position
+        resume_context = session_context.resume_context
+    else:
+        # Spring 연동 전 픽스처 검증용 — metadata가 아예 없을 때만 환경 변수로 주입
+        position = os.getenv("KKORI_POSITION_FIXTURE")
+        resume_context = os.getenv("KKORI_RESUME_CONTEXT_FIXTURE")
 
-    # Spring 연동 전 픽스처 검증용 — metadata가 없을 때만 환경 변수로 주입
-    position = session_context.position or os.getenv("KKORI_POSITION_FIXTURE")
-    resume_context = session_context.resume_context or os.getenv("KKORI_RESUME_CONTEXT_FIXTURE")
-
+    llm = inference.LLM(model=LLM_MODEL)
     session = AgentSession(
         stt=inference.STT(model=STT_MODEL, language=STT_LANGUAGE),
-        llm=inference.LLM(model=LLM_MODEL),
+        llm=llm,
         tts=inference.TTS(model=TTS_MODEL, voice=TTS_VOICE, language=TTS_LANGUAGE),
         turn_handling=TurnHandlingOptions(turn_detection=inference.TurnDetector()),
     )
@@ -46,9 +51,11 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     if not ctx.is_fake_job():
         await ctx.wait_for_participant()
 
-    await session.generate_reply(
-        instructions=initial_question_instructions(position=position, resume_context=resume_context)
+    # 초기 질문: LLM은 목록에서 번호만 고르고, 발화는 인사말 + 목록 원문으로 조립한다
+    question = await select_initial_question(
+        llm, position=position, resume_context=resume_context
     )
+    await session.say(initial_utterance(question))
 
 
 if __name__ == "__main__":

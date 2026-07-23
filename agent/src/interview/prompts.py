@@ -1,4 +1,4 @@
-"""면접관 프롬프트 — 페르소나·음성 제약·초기 질문 지시. docs/prd/interview.md §2."""
+"""면접관 프롬프트 — 페르소나·음성 제약·초기 질문 선택 지시. docs/prd/interview.md §2."""
 
 from __future__ import annotations
 
@@ -11,8 +11,11 @@ INTERVIEWER_INSTRUCTIONS = (
     "지원자는 대부분 신입 또는 주니어입니다. 재직 경력을 전제한 표현을 쓰지 마세요."
 )
 
-# 초기 질문 목록 — 유형별 2개(자기소개/지원동기/경험개괄/강점). LLM이 질문을 생성하지 않고
-# 이 검수된 목록에서 고르기만 한다(few-shot 생성은 예시를 어중간하게 섞은 질문이 나와 폐기).
+# 초기 질문 발화는 코드가 조립한다 — 고정 인사말 + 선택된 목록 원문 (LLM 자유 생성 없음)
+INITIAL_GREETING = "안녕하세요, 만나서 반갑습니다. 편하게 답변해 주시면 됩니다."
+
+# 초기 질문 목록 — 유형별 2개(자기소개/지원동기/경험개괄/강점). LLM은 이 검수된 목록에서
+# 번호로 고르기만 한다(few-shot 생성은 예시를 어중간하게 섞은 질문이 나와 폐기).
 # {position} 문장은 직무가 있을 때만 목록에 포함하며 치환은 코드가 처리한다.
 _INITIAL_QUESTION_POOL = (
     # 자기소개형
@@ -36,19 +39,21 @@ def _question_pool(position: str | None) -> tuple[str, ...]:
     return tuple(question for question in _INITIAL_QUESTION_POOL if "{position}" not in question)
 
 
-def initial_question_instructions(
+def selection_instructions(
     *, position: str | None = None, resume_context: str | None = None
 ) -> str:
-    """초기 질문 지시를 조립한다. 직무·이력서 요약이 없어도 성립한다(폴백)."""
-    questions = "\n".join(f"- {question}" for question in _question_pool(position))
+    """초기 질문 선택 지시를 조립한다. LLM 출력은 질문 번호 하나뿐이다(발화는 코드가 조립)."""
+    questions = "\n".join(
+        f"{number}. {question}"
+        for number, question in enumerate(_question_pool(position), start=1)
+    )
     parts = [
-        "면접을 시작합니다. 아래 질문 목록 중에서 지원자에게 가장 적절한 것을 하나 골라, "
-        "가볍게 인사한 뒤 물어보세요. 목록에 없는 새로운 질문을 만들지 마세요. "
-        f"고른 질문은 어투를 자연스럽게 다듬어도 되지만 내용은 유지하세요.\n{questions}",
+        "면접 초기 질문을 고릅니다. 아래 목록에서 지원자에게 가장 적절한 질문 하나를 골라 "
+        f"그 번호만 출력하세요. 다른 텍스트 없이 숫자 하나만 답하세요.\n{questions}",
     ]
     if resume_context:
         parts.append(
-            "다음은 지원자의 이력서 요약입니다. 어떤 질문이 적절할지 판단하는 데만 참고하고, "
-            f"질문에 이력서의 세부 경험을 언급하지는 마세요.\n{resume_context}"
+            "다음은 지원자의 이력서 요약입니다. 어떤 질문이 적절할지 판단하는 데만 참고하세요.\n"
+            f"{resume_context}"
         )
     return "\n\n".join(parts)
