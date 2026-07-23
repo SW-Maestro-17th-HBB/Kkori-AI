@@ -1,6 +1,11 @@
+import os
+
 from dotenv import load_dotenv
 from livekit import agents
 from livekit.agents import Agent, AgentServer, AgentSession, TurnHandlingOptions, inference
+
+from src.prompts import INTERVIEWER_INSTRUCTIONS, initial_question_instructions
+from src.session_context import parse_job_metadata
 
 load_dotenv()
 
@@ -15,13 +20,7 @@ TTS_LANGUAGE = "ko"
 
 class InterviewerAgent(Agent):
     def __init__(self) -> None:
-        super().__init__(
-            instructions=(
-                "당신은 AI 모의 면접관 '꼬리'입니다. 항상 한국어로 대화합니다. "
-                "지금은 음성 연결을 검증하는 단계이므로, 사용자의 말을 듣고 "
-                "짧고 자연스럽게 응답하세요. 이모지나 특수문자 없이 말하듯 답합니다."
-            )
-        )
+        super().__init__(instructions=INTERVIEWER_INSTRUCTIONS)
 
 
 server = AgentServer()
@@ -29,6 +28,12 @@ server = AgentServer()
 
 @server.rtc_session()
 async def entrypoint(ctx: agents.JobContext) -> None:
+    session_context = parse_job_metadata(ctx.job.metadata)
+
+    # Spring 연동 전 픽스처 검증용 — metadata가 없을 때만 환경 변수로 주입
+    position = session_context.position or os.getenv("KKORI_POSITION_FIXTURE")
+    resume_context = session_context.resume_context or os.getenv("KKORI_RESUME_CONTEXT_FIXTURE")
+
     session = AgentSession(
         stt=inference.STT(model=STT_MODEL, language=STT_LANGUAGE),
         llm=inference.LLM(model=LLM_MODEL),
@@ -36,8 +41,13 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         turn_handling=TurnHandlingOptions(turn_detection=inference.TurnDetector()),
     )
     await session.start(room=ctx.room, agent=InterviewerAgent())
+
+    # candidate 입장 전까지 첫 질문 보류 — 콘솔 모드는 fake room이라 대기 없이 진행
+    if not ctx.is_fake_job():
+        await ctx.wait_for_participant()
+
     await session.generate_reply(
-        instructions="사용자에게 인사하고, 음성이 잘 들리는지 확인해 달라고 요청하세요."
+        instructions=initial_question_instructions(position=position, resume_context=resume_context)
     )
 
 
