@@ -33,9 +33,31 @@ _INITIAL_QUESTION_POOL = (
 )
 
 
+# 지원 직무 표시명 — Spring 직무 enum 코드를 발화 가능한 한국어로 변환한다.
+# 세션 생성 계약의 enum과 동기화할 것 (현재 2종). 발화에는 이 표시명만 쓰이므로
+# 미등록 값은 직무 미지정으로 폴백된다(임의 문자열이 발화로 유입되지 않음).
+_POSITION_LABELS = {
+    "BACKEND": "백엔드",
+    "FRONTEND": "프론트엔드",
+}
+
+
+def position_label(position: str | None) -> str | None:
+    """position 값(enum 코드 또는 표시명)을 발화용 표시명으로 변환한다. 미등록 값은 None."""
+    if not position:
+        return None
+    key = position.strip()
+    label = _POSITION_LABELS.get(key.upper())
+    if label:
+        return label
+    # 한국어 표시명 자체도 허용 — 픽스처·과도기 호환
+    return key if key in _POSITION_LABELS.values() else None
+
+
 def _question_pool(position: str | None) -> tuple[str, ...]:
-    if position:
-        return tuple(question.format(position=position) for question in _INITIAL_QUESTION_POOL)
+    label = position_label(position)
+    if label:
+        return tuple(question.format(position=label) for question in _INITIAL_QUESTION_POOL)
     return tuple(question for question in _INITIAL_QUESTION_POOL if "{position}" not in question)
 
 

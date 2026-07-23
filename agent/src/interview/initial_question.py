@@ -12,7 +12,12 @@ import re
 
 from livekit.agents import llm as agents_llm
 
-from src.interview.prompts import INITIAL_GREETING, _question_pool, selection_instructions
+from src.interview.prompts import (
+    INITIAL_GREETING,
+    _question_pool,
+    position_label,
+    selection_instructions,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +42,8 @@ async def select_initial_question(
     llm: agents_llm.LLM, *, position: str | None = None, resume_context: str | None = None
 ) -> str:
     """목록에서 초기 질문 하나를 고른다. 항상 목록 원문을 반환한다."""
+    if position and position_label(position) is None:
+        logger.warning("미등록 position 값 — 직무 미지정으로 진행: %r", position[:20])
     pool = _question_pool(position)
     try:
         chat_ctx = agents_llm.ChatContext.empty()
