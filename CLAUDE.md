@@ -15,14 +15,14 @@ cd agent && uv sync                            # agent 의존성 동기화 (agen
 cd agent && uv run python -m src.main console  # 터미널 마이크로 에이전트와 직접 대화 (로컬 검증)
 cd agent && uv run python -m src.main dev      # LiveKit Cloud에 워커 등록 (Agents Playground로 테스트)
 uv add --project <서비스> <패키지>              # 의존성 추가 (해당 서비스의 uv.lock 자동 갱신)
-cd agent && uv run pytest                      # agent 테스트 (LLM 스모크는 LiveKit 자격증명 없으면 skip)
+cd agent && uv run pytest                      # agent 테스트 (LLM 스모크는 KKORI_LIVE_LLM=1 설정 시에만 실호출)
 uv run --project worker pytest worker          # worker 테스트 (일부는 로컬 인프라 없으면 skip)
 docker build -f agent/Dockerfile -t kkori-agent .    # 이미지 빌드 — 컨텍스트는 반드시 레포 루트
 docker build -f worker/Dockerfile -t kkori-worker .
 ```
 
 - 에이전트 실행에는 `agent/.env`에 LiveKit Cloud 자격증명 필요 (`agent/.env.example` 참조, Git 비추적)
-- agent는 `agent/tests/` 운용 중 — 단위 테스트(파싱·프롬프트 조립)는 항상 실행, LLM 스모크 테스트는 LiveKit 자격증명 없으면 skip(CI 포함 — CI는 LiveKit 시크릿 미설정). worker는 `worker/tests/` 운용 중 — 일부 테스트는 로컬 인프라(Postgres/Redis/MinIO) 없으면 skip, CI에서는 서비스 컨테이너로 전부 실행
+- agent는 `agent/tests/` 운용 중 — 단위 테스트(파싱·프롬프트 조립·선택 폴백)는 항상 실행, LLM 스모크 테스트(유료 실호출)는 `KKORI_LIVE_LLM=1` + LiveKit 자격증명이 있을 때만 실행(기본 skip — CI 포함). worker는 `worker/tests/` 운용 중 — 일부 테스트는 로컬 인프라(Postgres/Redis/MinIO) 없으면 skip, CI에서는 서비스 컨테이너로 전부 실행
 
 ## 작업 규칙
 

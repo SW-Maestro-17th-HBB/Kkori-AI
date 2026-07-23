@@ -34,6 +34,6 @@ jobs:
         run: uv run --no-sync python -c "import src.main"
 
       - name: Run tests
-        # LLM 스모크 테스트(tests/test_initial_question_llm.py)는 LiveKit 자격증명이 없으면 skip 된다
+        # LLM 스모크 테스트(tests/test_initial_question_llm.py)는 KKORI_LIVE_LLM 미설정이면 skip 된다 (기본)
         working-directory: agent
         run: uv run --no-sync pytest
