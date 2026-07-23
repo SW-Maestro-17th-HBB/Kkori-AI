@@ -11,3 +11,12 @@ dependencies = [
 [tool.uv]
 # 이 프로젝트 자체를 패키지로 빌드하지 않는다 — 의존성 관리 전용 (worker와 동일)
 package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
