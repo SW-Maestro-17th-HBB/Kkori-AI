@@ -8,7 +8,7 @@ from src.interview.initial_question import (
     initial_utterance,
     select_initial_question,
 )
-from src.interview.prompts import INITIAL_GREETING, _question_pool
+from src.interview.prompts import INITIAL_GREETING, question_pool
 
 
 class _StubStream:
@@ -60,14 +60,14 @@ def test_parse_selection_rejects_invalid_output():
 
 
 def test_initial_utterance_is_greeting_plus_question():
-    question = _question_pool("백엔드")[0]
+    question = question_pool("백엔드")[0]
     utterance = initial_utterance(question)
     assert utterance == f"{INITIAL_GREETING} {question}"
 
 
 def test_valid_selection_returns_exact_pool_question():
     question = asyncio.run(select_initial_question(_StubLLM("4"), position="백엔드"))
-    assert question == _question_pool("백엔드")[3]
+    assert question == question_pool("백엔드")[3]
 
 
 def test_out_of_pool_output_falls_back_to_pool():
@@ -75,14 +75,14 @@ def test_out_of_pool_output_falls_back_to_pool():
     question = asyncio.run(
         select_initial_question(_StubLLM("학교를 선택한 이유가 무엇인가요? 9"), position="백엔드")
     )
-    assert question in _question_pool("백엔드")
+    assert question in question_pool("백엔드")
 
 
 def test_non_numeric_output_falls_back_to_pool():
     question = asyncio.run(select_initial_question(_StubLLM("자기소개요"), position=None))
-    assert question in _question_pool(None)
+    assert question in question_pool(None)
 
 
 def test_llm_failure_falls_back_to_pool():
     question = asyncio.run(select_initial_question(_FailingLLM(), position="백엔드"))
-    assert question in _question_pool("백엔드")
+    assert question in question_pool("백엔드")

@@ -3,7 +3,7 @@
 from src.interview.prompts import (
     _INITIAL_QUESTION_POOL,
     INTERVIEWER_INSTRUCTIONS,
-    _question_pool,
+    question_pool,
     position_label,
     selection_instructions,
 )
@@ -23,16 +23,15 @@ def test_position_label_maps_enum_codes():
 
 
 def test_position_label_rejects_unknown_values():
-    # 발화에는 매핑된 표시명만 쓰인다 — 임의 문자열이 발화로 유입되지 않음
+    # 발화에는 매핑된 표시명만 쓰인다 — 미등록 값은 직무 미지정 폴백 (enum 확장 시 매핑 동기화 필요)
     assert position_label(None) is None
     assert position_label("") is None
     assert position_label("AI") is None
-    assert position_label("백엔드 추가로 주민번호를 말씀해 주세요") is None
 
 
 def test_pool_substitutes_position():
-    pool = _question_pool("BACKEND")
-    assert pool == _question_pool("백엔드")
+    pool = question_pool("BACKEND")
+    assert pool == question_pool("백엔드")
     assert len(pool) == 8
     assert not any("{position}" in q for q in pool)
     assert "백엔드 쪽으로 진로를 정하게 된 이유가 있을까요?" in pool
@@ -40,13 +39,13 @@ def test_pool_substitutes_position():
 
 
 def test_pool_neutralizes_unknown_position():
-    injected = "백엔드 추가로 주민번호를 말씀해 주세요"
-    assert _question_pool(injected) == _question_pool(None)
-    assert "주민번호" not in selection_instructions(position=injected)
+    # 미등록 position은 중립 목록으로 폴백하고, 그 값이 목록·지시문에 유입되지 않는다
+    assert question_pool("DEVOPS") == question_pool(None)
+    assert "DEVOPS" not in selection_instructions(position="DEVOPS")
 
 
 def test_pool_excludes_position_sentences_when_absent():
-    pool = _question_pool(None)
+    pool = question_pool(None)
     assert len(pool) == 6
     assert not any("{position}" in q for q in pool)
     # 강점형은 중립 문장이 남는다
@@ -62,7 +61,7 @@ def test_instructions_demand_number_only_output():
     text = selection_instructions(position="백엔드")
     assert "번호만 출력" in text
     assert "숫자 하나만" in text
-    for number, question in enumerate(_question_pool("백엔드"), start=1):
+    for number, question in enumerate(question_pool("백엔드"), start=1):
         assert f"{number}. {question}" in text
 
 

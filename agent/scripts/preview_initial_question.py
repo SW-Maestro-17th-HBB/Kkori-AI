@@ -26,8 +26,8 @@ load_dotenv()
 
 from livekit.agents import inference
 
+from src.config import LLM_MODEL
 from src.interview.initial_question import initial_utterance, select_initial_question
-from src.main import LLM_MODEL
 
 
 async def main() -> None:

@@ -54,7 +54,8 @@ def position_label(position: str | None) -> str | None:
     return key if key in _POSITION_LABELS.values() else None
 
 
-def _question_pool(position: str | None) -> tuple[str, ...]:
+def question_pool(position: str | None) -> tuple[str, ...]:
+    """직무 치환이 끝난 초기 질문 목록을 반환한다 — 선택 지시와 발화 조립이 공유하는 계약."""
     label = position_label(position)
     if label:
         return tuple(question.format(position=label) for question in _INITIAL_QUESTION_POOL)
@@ -67,7 +68,7 @@ def selection_instructions(
     """초기 질문 선택 지시를 조립한다. LLM 출력은 질문 번호 하나뿐이다(발화는 코드가 조립)."""
     questions = "\n".join(
         f"{number}. {question}"
-        for number, question in enumerate(_question_pool(position), start=1)
+        for number, question in enumerate(question_pool(position), start=1)
     )
     parts = [
         "면접 초기 질문을 고릅니다. 아래 목록에서 지원자에게 가장 적절한 질문 하나를 골라 "

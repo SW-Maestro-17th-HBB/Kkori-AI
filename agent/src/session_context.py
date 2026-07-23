@@ -39,7 +39,12 @@ def parse_job_metadata(raw: str) -> SessionContext:
         return SessionContext()
 
     session_id = data.get("sessionId")
-    interview_type = data.get("interviewType") or INTERVIEW_TYPE_RESUME
+    interview_type = data.get("interviewType")
+    interview_type = (
+        interview_type
+        if isinstance(interview_type, str) and interview_type
+        else INTERVIEW_TYPE_RESUME
+    )
     if interview_type != INTERVIEW_TYPE_RESUME:
         # 미지원 유형의 거부/분기는 5분 CS 유형 설계 시 확정 (PRD §1 제약사항)
         logger.warning("미지원 interviewType=%s — RESUME과 동일하게 진행", interview_type)

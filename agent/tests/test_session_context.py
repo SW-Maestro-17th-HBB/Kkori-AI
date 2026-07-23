@@ -53,3 +53,8 @@ def test_empty_or_non_string_optional_fields_become_none():
 def test_unknown_interview_type_is_kept():
     # 미지원 유형의 거부/분기는 5분 CS 설계 시 확정 — 현재는 값만 보존하고 동일 진행
     assert parse_job_metadata(json.dumps({"interviewType": "CS"})).interview_type == "CS"
+
+
+def test_non_string_interview_type_falls_back():
+    assert parse_job_metadata(json.dumps({"interviewType": 3})).interview_type == INTERVIEW_TYPE_RESUME
+    assert parse_job_metadata(json.dumps({"interviewType": ""})).interview_type == INTERVIEW_TYPE_RESUME

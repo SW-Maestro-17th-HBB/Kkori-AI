@@ -17,7 +17,7 @@ import pytest
 _REQUIRED_ENV = ("LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET")
 
 pytestmark = pytest.mark.skipif(
-    not os.getenv("KKORI_LIVE_LLM") or any(not os.getenv(key) for key in _REQUIRED_ENV),
+    os.getenv("KKORI_LIVE_LLM") != "1" or any(not os.getenv(key) for key in _REQUIRED_ENV),
     reason="KKORI_LIVE_LLM=1 + LiveKit 자격증명 설정 시에만 실호출",
 )
 
@@ -31,8 +31,8 @@ RESUME_CONTEXT = (
 async def _select(position: str | None, resume_context: str | None) -> str:
     from livekit.agents import inference
 
+    from src.config import LLM_MODEL
     from src.interview.initial_question import select_initial_question
-    from src.main import LLM_MODEL
 
     llm = inference.LLM(model=LLM_MODEL)
     try:
@@ -44,7 +44,7 @@ async def _select(position: str | None, resume_context: str | None) -> str:
 
 
 def test_selected_question_is_exactly_from_pool():
-    from src.interview.prompts import _question_pool
+    from src.interview.prompts import question_pool
 
     async def collect() -> list[str]:
         return list(
@@ -52,11 +52,11 @@ def test_selected_question_is_exactly_from_pool():
         )
 
     for question in asyncio.run(collect()):
-        assert question in _question_pool(POSITION)
+        assert question in question_pool(POSITION)
 
 
 def test_fallback_without_context_selects_from_neutral_pool():
-    from src.interview.prompts import _question_pool
+    from src.interview.prompts import question_pool
 
     question = asyncio.run(_select(None, None))
-    assert question in _question_pool(None)
+    assert question in question_pool(None)
