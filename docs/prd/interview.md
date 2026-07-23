@@ -35,7 +35,8 @@
 
 ### 검증 기준
 
-- metadata의 position·resumeContext가 초기 질문 지시에 반영되는지 확인.
+- metadata의 position·resumeContext가 초기 질문 지시에 반영되는지 확인(position은 표시명으로 변환).
+- 미등록 position 값이 직무 미지정으로 폴백하고 경고 로그를 남기는지 확인.
 - metadata 없이 시작해도 에이전트가 크래시 없이 일반 초기 질문으로 진행하는지 확인.
 - 잘못된 형식의 metadata에서 파싱 예외가 처리되고 경고 로그가 남는지 확인.
 
@@ -51,12 +52,13 @@
 {
   "sessionId": 123,
   "interviewType": "RESUME",
-  "position": "백엔드",
+  "position": "BACKEND",
   "resumeContext": "역할: 백엔드 (프로젝트: Kkori 결제 시스템) / 기술: Java, Spring, Redis"
 }
 ```
 
-- `position`(지원 직무)은 **옵셔널**이며, 자유 문자열로 받아 질문 목록의 `{position}` 문장에 **코드가 치환**한다. 없으면 해당 문장을 목록에서 제외하고 폴백한다. 직무별 프롬프트 분리는 하지 않는다 — 직무는 질문 로직을 바꾸지 않는 사실 정보이며, 직무별로 질문 로직 자체가 달라지는 요구는 `interview_type` 확장으로 다룬다.
+- `position`(지원 직무)은 **옵셔널**이며, 질문 목록의 `{position}` 문장에 **코드가 치환**한다. 없으면 해당 문장을 목록에서 제외하고 폴백한다. 직무별 프롬프트 분리는 하지 않는다 — 직무는 질문 로직을 바꾸지 않는 사실 정보이며, 직무별로 질문 로직 자체가 달라지는 요구는 `interview_type` 확장으로 다룬다.
+- `position`의 원천은 **Spring이 관리하는 직무 enum**(사용자가 UI에서 선택, 현재 `BACKEND`·`FRONTEND` 2종)이다. agent는 **코드→발화용 표시명 매핑**(`BACKEND`→"백엔드", `FRONTEND`→"프론트엔드")으로 변환해 치환하며, **발화에는 매핑된 표시명만 쓰인다** — 미등록 값은 직무 미지정으로 폴백하고 경고 로그를 남긴다(임의 문자열의 발화 유입 차단, 휴리스틱 정규화 불필요). 한국어 표시명 자체도 허용한다(픽스처·과도기 호환). enum 확장 시 agent 매핑을 동기화해야 하며, 최종 전달 형식은 세션 생성 계약에서 확정한다 **[미확정]**.
 - `resumeContext`(이력서 요약)도 **옵셔널**이다. 질문 선택 판단 재료로만 쓰이며, 없으면 목록에서 자유 선택한다.
 - 요약 출처(방향): Spring이 세션 생성 시 worker 분석 결과인 `resumes.structured_data`(skills/projects/experiences)에서 직무·기술·경력을 **코드로 조립**한다(별도 LLM 요약 미사용) **[미확정 — 세션 생성 스토리에서 확정]**.
 - Spring 연동 전(자동 디스패치 임시 단계)의 개발·테스트는 **픽스처**(환경 변수 `KKORI_POSITION_FIXTURE`·`KKORI_RESUME_CONTEXT_FIXTURE`)로 수행한다. 픽스처는 **metadata가 아예 없을 때만** 적용된다 — metadata가 존재하면 누락 필드에 픽스처를 섞지 않는다.
