@@ -4,7 +4,7 @@ from src.interview.prompts import (
     _INITIAL_QUESTION_POOL,
     INTERVIEWER_INSTRUCTIONS,
     _question_pool,
-    initial_question_instructions,
+    selection_instructions,
 )
 
 
@@ -33,26 +33,25 @@ def test_pool_is_career_neutral():
     assert not any("일해오" in q or "재직" in q or "경력" in q for q in _INITIAL_QUESTION_POOL)
 
 
-def test_instructions_enforce_selection():
-    text = initial_question_instructions(position="백엔드")
-    assert "목록에 없는 새로운 질문을 만들지 마세요" in text
-    assert "내용은 유지하세요" in text
-    for question in _question_pool("백엔드"):
-        assert question in text
+def test_instructions_demand_number_only_output():
+    text = selection_instructions(position="백엔드")
+    assert "번호만 출력" in text
+    assert "숫자 하나만" in text
+    for number, question in enumerate(_question_pool("백엔드"), start=1):
+        assert f"{number}. {question}" in text
 
 
 def test_resume_context_is_selection_material_only():
-    text = initial_question_instructions(position="백엔드", resume_context="기술: Java")
+    text = selection_instructions(position="백엔드", resume_context="기술: Java")
     assert "판단하는 데만 참고" in text
-    assert "세부 경험을 언급하지는 마세요" in text
     assert "기술: Java" in text
 
 
 def test_instructions_hold_without_optional_inputs():
-    text = initial_question_instructions()
+    text = selection_instructions()
     assert "이력서 요약" not in text
     assert "백엔드" not in text
-    assert "목록에 없는 새로운 질문을 만들지 마세요" in text
+    assert "번호만 출력" in text
 
 
 def test_system_prompt_constraints():
