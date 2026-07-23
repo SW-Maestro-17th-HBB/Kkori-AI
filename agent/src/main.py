@@ -40,6 +40,12 @@ async def entrypoint(ctx: agents.JobContext) -> None:
 
     llm = inference.LLM(model=LLM_MODEL)
 
+    # 룸 연결과 candidate 입장 확인을 가장 먼저 한다(wait_for_participant가 미연결 시 자동 연결) —
+    # 참가자가 끝내 입장하지 않으면 유료 선택 호출도 발생하지 않고, LLM 지연이 룸 연결을 막지 않는다.
+    # 콘솔 모드는 fake room이라 대기 없이 진행.
+    if not ctx.is_fake_job():
+        await ctx.wait_for_participant()
+
     # 초기 질문은 세션 시작(마이크 입력·자동 턴 처리 활성화) 전에 확정한다 —
     # 선택 LLM 호출이 걸리는 동안 자동 턴 응답과 첫 질문이 경쟁하지 않도록.
     # LLM은 목록에서 번호만 고르고, 발화는 인사말 + 목록 원문으로 조립한다.
@@ -54,10 +60,6 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         turn_handling=TurnHandlingOptions(turn_detection=inference.TurnDetector()),
     )
     await session.start(room=ctx.room, agent=InterviewerAgent())
-
-    # candidate 입장 전까지 첫 질문 보류 — 콘솔 모드는 fake room이라 대기 없이 진행
-    if not ctx.is_fake_job():
-        await ctx.wait_for_participant()
 
     await session.say(initial_utterance(question))
 
