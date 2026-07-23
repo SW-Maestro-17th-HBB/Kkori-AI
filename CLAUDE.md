@@ -33,7 +33,7 @@ docker build -f worker/Dockerfile -t kkori-worker .
 ## 기술적 결정사항
 
 - **서비스별 독립 uv 프로젝트 (워크스페이스 아님)** — 두 서비스는 상호 import 없이 독립 배포되므로 단일 락파일 워크스페이스 대신 서비스마다 자체 pyproject.toml·uv.lock을 둔다(서비스 간 잠금 결합 제거, 팀원 간 작업 충돌 방지). 각 Dockerfile이 자기 락파일로 `uv sync --locked --no-dev` 후 소스 복사. pyproject에 build-system 없이 `[tool.uv] package = false`로 의존성만 설치(현행 `src/` 레이아웃 유지)
-- **livekit-agents + LiveKit Inference** — 최종적으로 self-host SFU 예정이라 STT·LLM·TTS built-in이 없어 직접 연동이 필요하지만, 개발 단계에서는 LiveKit Cloud + Inference를 사용해 별도 프로바이더 API 키 없이 LiveKit 자격증명 하나로 동작. 모델 구성은 `agent/src/main.py` 상단 상수로, 교체 시 상수만 변경
+- **livekit-agents + LiveKit Inference** — 최종적으로 self-host SFU 예정이라 STT·LLM·TTS built-in이 없어 직접 연동이 필요하지만, 개발 단계에서는 LiveKit Cloud + Inference를 사용해 별도 프로바이더 API 키 없이 LiveKit 자격증명 하나로 동작. 모델 구성은 `agent/src/config.py` 상수로, 교체 시 상수만 변경
 - **자동 디스패치(임시)** — `agent_name` 미지정으로 모든 신규 룸에 에이전트가 자동 입장(테스트 편의). Spring이 `createDispatch(agentName)`로 명시 디스패치하는 방식은 세션 생성 스토리에서 전환
 - **재연결 미처리(현재)** — 참가자 퇴장 시 세션 즉시 종료(기본값). `close_on_disconnect=False` + 재연결 창 처리는 INTERRUPTED 상태 스토리 범위
 

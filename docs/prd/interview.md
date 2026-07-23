@@ -95,7 +95,7 @@
 ### 실행 조건
 
 - 기능 1(세션 컨텍스트 주입) 완료 또는 폴백 상태.
-- STT/LLM/TTS 모델은 `agent/src/main.py` 상단 상수로 구성(LiveKit Inference 경유, 현행 유지).
+- STT/LLM/TTS 모델은 `agent/src/config.py` 상수로 구성(LiveKit Inference 경유, 현행 유지).
 
 ### 검증 기준
 
