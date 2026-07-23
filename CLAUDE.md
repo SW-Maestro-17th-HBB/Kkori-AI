@@ -28,7 +28,7 @@ docker build -f worker/Dockerfile -t kkori-worker .
 
 - 의존성 변경은 pyproject.toml 직접 편집 대신 `uv add/remove --project <서비스>` 사용, `uv.lock` 커밋 필수
 - 코드 변경 후 최소한 import 검증(`cd <서비스> && uv run python -c "import src.main"`)을 통과할 것 — CI 첫 관문과 동일
-- 커밋 메시지 타입은 `feat`, `fix`, `chore`, `docs`, `refactor`, `test`를 사용 (예: `feat: HBB1-263 bootstrap livekit voice agent`)
+- 커밋 메시지 타입은 `feat`, `fix`, `chore`, `docs`, `refactor`, `test`를 사용하고 지라 키는 넣지 않는다 (예: `feat: bootstrap livekit voice agent`) — 지라 연동은 브랜치 키와 PR 제목이 담당
 
 ## 기술적 결정사항
 
