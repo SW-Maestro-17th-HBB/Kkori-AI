@@ -34,5 +34,6 @@ jobs:
         run: uv run --no-sync python -c "import src.main"
 
       - name: Run tests
-        # 테스트 추가 시 수정 (exit 5 = 수집된 테스트 없음 → 통과 처리)
-        run: uv run --project agent --no-sync --with pytest pytest agent || [ $? -eq 5 ]
+        # LLM 스모크 테스트(tests/test_initial_question_llm.py)는 LiveKit 자격증명이 없으면 skip 된다
+        working-directory: agent
+        run: uv run --no-sync pytest
