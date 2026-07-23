@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 from livekit import agents
 from livekit.agents import Agent, AgentServer, AgentSession, TurnHandlingOptions, inference
 
-from src.prompts import INTERVIEWER_INSTRUCTIONS, initial_question_instructions
+from src.interview.prompts import INTERVIEWER_INSTRUCTIONS, initial_question_instructions
 from src.session_context import parse_job_metadata
 
 load_dotenv()

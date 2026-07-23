@@ -25,7 +25,7 @@ from livekit.agents import inference
 from livekit.agents.llm import ChatContext
 
 from src.main import LLM_MODEL
-from src.prompts import INTERVIEWER_INSTRUCTIONS, initial_question_instructions
+from src.interview.prompts import INTERVIEWER_INSTRUCTIONS, initial_question_instructions
 
 
 async def sample(llm: inference.LLM, position: str | None, resume_context: str | None) -> str:
