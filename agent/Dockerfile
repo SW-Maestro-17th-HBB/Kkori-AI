@@ -7,9 +7,8 @@ WORKDIR /app
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
 
 # 의존성 레이어 — 소스 변경 시에도 캐시 유지
-COPY pyproject.toml uv.lock ./
-COPY agent/pyproject.toml agent/
-RUN uv sync --frozen --no-dev --package kkori-agent
+COPY agent/pyproject.toml agent/uv.lock ./
+RUN uv sync --locked --no-dev
 
 ENV PATH="/app/.venv/bin:$PATH"
 

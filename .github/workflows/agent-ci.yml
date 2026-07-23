@@ -6,15 +6,11 @@ on:
     paths:
       - "agent/**"
       - "shared/**"
-      - "pyproject.toml"
-      - "uv.lock"
       - ".github/workflows/agent-ci.yml"
   pull_request:
     paths:
       - "agent/**"
       - "shared/**"
-      - "pyproject.toml"
-      - "uv.lock"
       - ".github/workflows/agent-ci.yml"
 
 jobs:
@@ -23,17 +19,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: astral-sh/setup-uv@v8.3.2
+      - uses: astral-sh/setup-uv@v9.0.0
         with:
-          python-version: "3.13"
           enable-cache: true
+          cache-dependency-glob: "agent/uv.lock"
 
       - name: Install dependencies
-        run: uv sync --locked --package kkori-agent
+        # 파이썬 버전은 agent/.python-version(3.13)을 uv 가 자동으로 맞춘다
+        working-directory: agent
+        run: uv sync --locked
 
       - name: Import check
-        run: cd agent && uv run --no-sync python -c "import src.main"
+        working-directory: agent
+        run: uv run --no-sync python -c "import src.main"
 
       - name: Run tests
         # 테스트 추가 시 수정 (exit 5 = 수집된 테스트 없음 → 통과 처리)
-        run: uv run --no-sync --with pytest pytest agent || [ $? -eq 5 ]
+        run: uv run --project agent --no-sync --with pytest pytest agent || [ $? -eq 5 ]
