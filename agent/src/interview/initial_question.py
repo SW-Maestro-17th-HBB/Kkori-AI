@@ -55,6 +55,7 @@ async def select_initial_question(
 
     index = _parse_selection(text, len(pool))
     if index is None:
-        logger.warning("질문 번호 파싱 실패 — 목록에서 랜덤 폴백: %r", text[:100])
+        # 출력 원문은 기록하지 않는다 — 모델이 요약 내용을 되돌려줄 수 있음 (PRD §1 기타 요구사항)
+        logger.warning("질문 번호 파싱 실패 — 목록에서 랜덤 폴백 (출력 길이 %d자)", len(text))
         return random.choice(pool)
     return pool[index]

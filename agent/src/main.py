@@ -39,6 +39,14 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         resume_context = os.getenv("KKORI_RESUME_CONTEXT_FIXTURE")
 
     llm = inference.LLM(model=LLM_MODEL)
+
+    # 초기 질문은 세션 시작(마이크 입력·자동 턴 처리 활성화) 전에 확정한다 —
+    # 선택 LLM 호출이 걸리는 동안 자동 턴 응답과 첫 질문이 경쟁하지 않도록.
+    # LLM은 목록에서 번호만 고르고, 발화는 인사말 + 목록 원문으로 조립한다.
+    question = await select_initial_question(
+        llm, position=position, resume_context=resume_context
+    )
+
     session = AgentSession(
         stt=inference.STT(model=STT_MODEL, language=STT_LANGUAGE),
         llm=llm,
@@ -51,10 +59,6 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     if not ctx.is_fake_job():
         await ctx.wait_for_participant()
 
-    # 초기 질문: LLM은 목록에서 번호만 고르고, 발화는 인사말 + 목록 원문으로 조립한다
-    question = await select_initial_question(
-        llm, position=position, resume_context=resume_context
-    )
     await session.say(initial_utterance(question))
 
 
