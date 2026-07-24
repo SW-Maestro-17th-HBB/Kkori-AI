@@ -127,6 +127,7 @@ def test_abnormal_outputs_fall_back_to_vetted_pool():
         "+ 첫 번째 질문\n+ 두 번째 질문",  # 불릿 목록(+)
         "1. 첫 번째 질문\n2. 두 번째 질문",  # 순서 목록
         "> 인용 형식의 질문입니다.",  # 인용
+        "# 질문 제목\n어떻게 생각하세요?",  # 줄머리 헤딩
         "[질문](https://example.com)",  # 마크다운 링크
         "**중요한** 질문입니다.",  # 마크다운 강조
     )
@@ -173,3 +174,10 @@ def test_hanging_llm_times_out_to_fallback(monkeypatch):
 def test_normal_output_is_trimmed():
     result = _generate(_StubLLM("  왜 그렇게 판단하셨나요?  \n"), _deepen())
     assert result.text == "왜 그렇게 판단하셨나요?"
+
+
+def test_inline_hash_in_tech_terms_is_not_forbidden():
+    # C#·F# 같은 인라인 #은 마크다운 헤딩이 아니다 — 정상 질문을 폴백으로 버리지 않는다
+    result = _generate(_StubLLM("C#을 사용해 보신 경험이 있나요?"), _deepen())
+    assert not result.is_fallback
+    assert result.text == "C#을 사용해 보신 경험이 있나요?"

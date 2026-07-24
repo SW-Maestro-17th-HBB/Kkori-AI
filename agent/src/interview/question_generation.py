@@ -33,11 +33,12 @@ from src.interview.prompts import (
 
 logger = logging.getLogger(__name__)
 
-# 마크다운 조각 — 링크(]()까지 포함
-_FORBIDDEN_MARKERS = ("#", "*", "`", "•", "](")
+# 마크다운 조각 — 링크(]()까지 포함. 인라인 `#`은 제외한다(C#·F# 같은 정상 기술
+# 용어를 폴백으로 흘려보내지 않도록) — 헤딩은 줄머리 형태만 _LIST_LINE이 잡는다
+_FORBIDDEN_MARKERS = ("*", "`", "•", "](")
 
-# 줄 시작의 목록·인용 마커 — CommonMark 불릿(-, +, *), 순서 목록(1. / 1)), 인용(>)
-_LIST_LINE = re.compile(r"^(?:[-+*]|\d+[.)]|>)\s")
+# 줄 시작의 목록·인용·헤딩 마커 — CommonMark 불릿(-, +, *), 순서 목록(1. / 1)), 인용(>), 헤딩(#)
+_LIST_LINE = re.compile(r"^(?:[-+*]|\d+[.)]|>|#+)\s")
 
 
 @dataclass(frozen=True)
