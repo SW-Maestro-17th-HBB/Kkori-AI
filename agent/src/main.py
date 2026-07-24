@@ -25,9 +25,13 @@ from src.interview.prompts import INTERVIEWER_INSTRUCTIONS
 from src.interview.question_generation import generate_question
 from src.interview.redis_sink import create_transcript_writer
 from src.interview.turn_pipeline import SpeechResult, TurnPipeline
+from src.log_privacy import install_privacy_filter
 from src.session_context import parse_job_metadata
 
 load_dotenv()
+
+# 프레임워크 내부 로그의 STT 원문 extra 마스킹 — 답변 원문 운영 로그 금지 (PRD)
+install_privacy_filter()
 
 logger = logging.getLogger(__name__)
 
