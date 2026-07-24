@@ -35,8 +35,8 @@ logger = logging.getLogger(__name__)
 # 마크다운 조각 — 링크(]()까지 포함
 _FORBIDDEN_MARKERS = ("#", "*", "`", "•", "](")
 
-# 줄 시작의 목록·인용 마커 — 불릿(-), 순서 목록(1. / 1)), 인용(>)
-_LIST_LINE = re.compile(r"^(?:-|\d+[.)]|>)\s")
+# 줄 시작의 목록·인용 마커 — CommonMark 불릿(-, +, *), 순서 목록(1. / 1)), 인용(>)
+_LIST_LINE = re.compile(r"^(?:[-+*]|\d+[.)]|>)\s")
 
 
 @dataclass(frozen=True)

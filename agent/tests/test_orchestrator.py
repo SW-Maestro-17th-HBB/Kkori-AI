@@ -98,8 +98,9 @@ def test_unknown_action_falls_back():
 
 
 def test_parse_failure_log_never_contains_answer_content(caplog):
-    # ValidationError의 input_value로 개인정보가 운영 로그에 새지 않아야 한다
-    sensitive = '{"reason": "주민번호 990101-1234567", "action": "잘못된값"}'
+    # malformed JSON이면 ValidationError의 input_value에 원문 전체(민감 값 포함)가
+    # 담긴다 — exc_info 기록 시 그대로 새는 버그의 정확한 재현 픽스처
+    sensitive = '{"reason":"990101-1234567","action":'
     with caplog.at_level("WARNING"):
         decision = _decide(sensitive)
     assert decision.source is DecisionSource.FALLBACK
