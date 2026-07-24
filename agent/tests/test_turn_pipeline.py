@@ -67,7 +67,10 @@ class _SaySpy:
     async def __call__(self, text):
         self.calls.append(text)
         if self._results:
-            return self._results.pop(0)
+            result = self._results.pop(0)
+            if isinstance(result, Exception):
+                raise result
+            return result
         return SpeechResult(ok=True, started_at=SPOKE_AT)
 
 
@@ -264,6 +267,43 @@ def test_tts_exhaustion_shuts_down_without_commit():
     assert env.shutdowns == [True]
     assert env.log.last_question_number() == 2  # 미커밋 — 번호 미소모
     assert env.log.utterances[-1].speaker is Speaker.CANDIDATE
+
+
+def test_say_exception_is_treated_as_failure_and_retried():
+    env = _make(say=_SaySpy(results=(
+        SpeechResult(ok=True, started_at=SPOKE_AT),  # 초기 발화
+        SpeechResult(ok=True, started_at=SPOKE_AT),  # 첫 전환 질문
+        RuntimeError("session closed"),  # 본론 질문 1차 — 예외
+        SpeechResult(ok=True, started_at=SPOKE_AT),  # 재시도 성공
+    )))
+
+    async def scenario():
+        await _bootstrap(env)
+        env.pipeline.on_user_turn_completed("본론 답변입니다.")
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    assert env.say.calls[-1] == env.say.calls[-2]  # 예외도 실패로 보고 같은 질문 재시도
+    assert env.log.utterances[-1].speaker is Speaker.INTERVIEWER  # 성공 후 커밋
+    assert not env.shutdowns
+
+
+def test_say_exception_twice_shuts_down_without_commit():
+    env = _make(say=_SaySpy(results=(
+        SpeechResult(ok=True, started_at=SPOKE_AT),
+        SpeechResult(ok=True, started_at=SPOKE_AT),
+        RuntimeError("session closed"),
+        RuntimeError("session closed"),
+    )))
+
+    async def scenario():
+        await _bootstrap(env)
+        env.pipeline.on_user_turn_completed("본론 답변입니다.")
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    assert env.shutdowns == [True]  # 예외가 잡 종료 경로를 우회하지 않는다
+    assert env.log.last_question_number() == 2  # 미커밋·번호 미소모
 
 
 # --- LLM 실패 경로에서도 발화 ---

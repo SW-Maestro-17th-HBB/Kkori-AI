@@ -161,12 +161,12 @@ class TurnPipeline:
         """
         if self._is_stale(generation):
             return
-        result = await self._say_fn(text)
+        result = await self._try_say(text)
         if not result.ok:
             if self._is_stale(generation):
                 return
             logger.warning("질문 재생 실패 — 같은 질문 처음부터 재시도")
-            result = await self._say_fn(text)
+            result = await self._try_say(text)
             if not result.ok:
                 logger.error("TTS 재시도 소진 — 세션 진행 불가, 잡을 종료한다")
                 self._shutdown_fn()
@@ -191,6 +191,15 @@ class TurnPipeline:
                     ref_question_number=ref_question_number,
                 )
             )
+
+    async def _try_say(self, text: str) -> SpeechResult:
+        """say_fn 예외도 재생 실패와 동일하게 처리한다 — 예외가 재시도·잡 종료
+        경로를 우회해 세션이 침묵으로 방치되는 것을 막는다(세션 종료·미시작 등)."""
+        try:
+            return await self._say_fn(text)
+        except Exception as exc:
+            logger.warning("질문 재생 호출 예외(%s) — 실패로 처리", type(exc).__name__)
+            return SpeechResult(ok=False)
 
     # --- 커밋·수명 관리 ---
 
