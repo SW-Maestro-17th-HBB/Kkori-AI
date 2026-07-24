@@ -166,6 +166,7 @@ def test_next_topic_instructions_hold_without_optional_inputs():
 def test_fallback_questions_are_vetted_and_answer_independent():
     assert len(FALLBACK_QUESTIONS) >= 3
     for question in FALLBACK_QUESTIONS:
+        assert len(question) >= 15  # 폴백 품질 회귀 방지 — 지나치게 짧은 문자열 차단
         assert "{position}" not in question
         assert not any(marker in question for marker in ("#", "*", "-", "`"))
         assert question.endswith(("요?", "니다."))  # 구어체 검수 확인

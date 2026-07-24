@@ -22,6 +22,7 @@ from src.config import (
 )
 from src.interview.context import branch_text, follow_up_messages, recent_branch_messages
 from src.interview.conversation_log import Action, ConversationLog, FollowUpType
+from src.interview.llm_stream import collect_chat_text
 from src.interview.orchestrator import Decision
 from src.interview.prompts import (
     FALLBACK_QUESTIONS,
@@ -82,11 +83,7 @@ async def generate_question(
     chat_ctx.add_message(role="user", content=instruction)
 
     try:
-        text = ""
-        async with llm.chat(chat_ctx=chat_ctx) as stream:
-            async for chunk in stream:
-                if chunk.delta and chunk.delta.content:
-                    text += chunk.delta.content
+        text = await collect_chat_text(llm, chat_ctx)
     except Exception as exc:
         # 예외 객체는 기록하지 않는다 — 요청 페이로드(답변 원문)가 담길 수 있다
         logger.warning("Interview 호출 실패(%s) — 폴백 질문 발화", type(exc).__name__)

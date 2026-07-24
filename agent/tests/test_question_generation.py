@@ -142,6 +142,34 @@ def test_call_failure_falls_back():
     assert result.text in FALLBACK_QUESTIONS
 
 
+class _HangingStream:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        await asyncio.sleep(3600)
+
+
+class _HangingLLM:
+    def chat(self, **kwargs):
+        return _HangingStream()
+
+
+def test_hanging_llm_times_out_to_fallback(monkeypatch):
+    import src.interview.llm_stream as llm_stream
+
+    monkeypatch.setattr(llm_stream, "LLM_CALL_TIMEOUT_SECONDS", 0.05)
+    result = _generate(_HangingLLM(), _deepen())
+    assert result.is_fallback
+    assert result.text in FALLBACK_QUESTIONS
+
+
 def test_normal_output_is_trimmed():
     result = _generate(_StubLLM("  왜 그렇게 판단하셨나요?  \n"), _deepen())
     assert result.text == "왜 그렇게 판단하셨나요?"

@@ -131,6 +131,34 @@ def test_llm_failure_falls_back():
     assert decision.source is DecisionSource.FALLBACK
 
 
+class _HangingStream:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        await asyncio.sleep(3600)
+
+
+class _HangingLLM:
+    def chat(self, **kwargs):
+        return _HangingStream()
+
+
+def test_hanging_llm_times_out_to_fallback(monkeypatch):
+    # 스트림이 매달리면 턴이 침묵으로 고정된다 — 타임아웃이 폴백 경로로 회수해야 한다
+    import src.interview.llm_stream as llm_stream
+
+    monkeypatch.setattr(llm_stream, "LLM_CALL_TIMEOUT_SECONDS", 0.05)
+    decision = asyncio.run(decide(_HangingLLM(), _log()))
+    assert decision.source is DecisionSource.FALLBACK
+
+
 def test_consistency_with_valid_ref_is_kept():
     decision = _decide(
         {

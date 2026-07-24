@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from src.config import ORCHESTRATOR_INPUT_TOKEN_BUDGET, UTTERANCE_INJECTION_TOKEN_CAP
 from src.interview.context import estimate_tokens, orchestrator_context
 from src.interview.conversation_log import Action, ConversationLog, FollowUpType
+from src.interview.llm_stream import collect_chat_text
 from src.interview.prompts import orchestrator_instructions
 
 logger = logging.getLogger(__name__)
@@ -75,13 +76,9 @@ async def decide(llm: agents_llm.LLM, log: ConversationLog) -> Decision:
     try:
         chat_ctx = agents_llm.ChatContext.empty()
         chat_ctx.add_message(role="user", content=orchestrator_instructions(conversation))
-        text = ""
-        async with llm.chat(
-            chat_ctx=chat_ctx, response_format=OrchestratorDecision
-        ) as stream:
-            async for chunk in stream:
-                if chunk.delta and chunk.delta.content:
-                    text += chunk.delta.content
+        text = await collect_chat_text(
+            llm, chat_ctx, response_format=OrchestratorDecision
+        )
         parsed = OrchestratorDecision.model_validate_json(text)
     except Exception as exc:
         # 예외 객체를 기록하지 않는다 — ValidationError의 input_value 등에
