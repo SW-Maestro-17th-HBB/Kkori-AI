@@ -26,7 +26,17 @@ class RedactSpeechExtra(logging.Filter):
 
 
 def install_privacy_filter() -> None:
-    """livekit.agents 로거에 마스킹 필터를 설치한다 — 멱등."""
+    """마스킹 필터를 설치한다 — 멱등, 로거·루트 핸들러 양쪽.
+
+    livekit-agents 대부분은 공유 로거("livekit.agents")로 로그를 내지만 일부 모듈은
+    `getLogger(__name__)` 하위 로거를 쓴다 — 하위 로거가 낸 레코드는 상위 로거의
+    핸들러로 전파되지만 상위 로거의 **필터는 타지 않으므로**, 루트 핸들러에도 같은
+    필터를 건다. 핸들러는 런타임(cli)이 늦게 구성할 수 있어 entrypoint에서
+    재호출한다(멱등).
+    """
     target = logging.getLogger("livekit.agents")
     if not any(isinstance(existing, RedactSpeechExtra) for existing in target.filters):
         target.addFilter(RedactSpeechExtra())
+    for handler in logging.getLogger().handlers:
+        if not any(isinstance(existing, RedactSpeechExtra) for existing in handler.filters):
+            handler.addFilter(RedactSpeechExtra())

@@ -42,7 +42,7 @@ class InterviewerAgent(Agent):
         self._pipeline = pipeline
 
     async def on_user_turn_completed(self, turn_ctx, new_message) -> None:
-        # 훅은 답변 커밋·세대 증가만 하고 즉시 반환한다 — 프레임워크가 이전 훅 완료를
+        # 훅은 답변 커밋·턴 순번 증가만 하고 즉시 반환한다 — 프레임워크가 이전 훅 완료를
         # 기다리므로, 파이프라인(판단→생성→발화)은 훅 밖의 독립 task로 실행된다.
         self._pipeline.on_user_turn_completed(new_message.text_content or "")
 
@@ -79,6 +79,9 @@ server = AgentServer()
 
 @server.rtc_session()
 async def entrypoint(ctx: agents.JobContext) -> None:
+    # cli.run_app이 늦게 구성한 핸들러에도 마스킹 필터를 적용한다 (멱등)
+    install_privacy_filter()
+
     session_id = None
     if ctx.job.metadata:
         session_context = parse_job_metadata(ctx.job.metadata)

@@ -10,6 +10,10 @@ def _cleanup():
     for existing in list(target.filters):
         if isinstance(existing, RedactSpeechExtra):
             target.removeFilter(existing)
+    for handler in logging.getLogger().handlers:
+        for existing in list(handler.filters):
+            if isinstance(existing, RedactSpeechExtra):
+                handler.removeFilter(existing)
 
 
 def test_sensitive_extra_fields_are_redacted_before_handlers(caplog):
@@ -36,4 +40,26 @@ def test_install_is_idempotent():
         count = sum(isinstance(f, RedactSpeechExtra) for f in target.filters)
         assert count == 1
     finally:
+        _cleanup()
+
+
+def test_child_logger_records_are_redacted_via_root_handlers():
+    """getLogger(__name__) 하위 로거 경로 — 상위 로거 필터는 안 타므로 핸들러 필터가 잡는다."""
+    records = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    handler = _Capture()
+    root = logging.getLogger()
+    root.addHandler(handler)
+    try:
+        install_privacy_filter()  # 이미 존재하는 루트 핸들러에 필터 부착
+        child = logging.getLogger("livekit.agents.voice.avatar._queue_io")
+        child.warning("audio dropped", extra={"user_input": "주민번호 990101-1234567입니다"})
+        captured = [r for r in records if hasattr(r, "user_input")]
+        assert captured and captured[0].user_input == "[redacted]"
+    finally:
+        root.removeHandler(handler)
         _cleanup()
