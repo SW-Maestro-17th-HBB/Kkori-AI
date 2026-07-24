@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 
 
@@ -56,8 +56,9 @@ class Utterance:
     def __post_init__(self) -> None:
         if not self.content:
             raise ValueError("content는 비어 있을 수 없다")
-        if self.spoken_at.tzinfo is None:
-            raise ValueError("spoken_at은 timezone-aware여야 한다 (UTC)")
+        if self.spoken_at.utcoffset() != timedelta(0):
+            # naive는 utcoffset()이 None이라 함께 거부된다 — spokenAt 직렬화("Z")의 전제
+            raise ValueError("spoken_at은 UTC(offset 0)인 timezone-aware여야 한다")
         if self.question_number < 1:
             raise ValueError("question_number는 1 이상이어야 한다")
 

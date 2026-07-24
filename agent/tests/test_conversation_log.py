@@ -1,6 +1,6 @@
 """대화 로그 단위 테스트 — 발화 불변식·직렬화·줄기 조회. docs/prd/follow-up-question.md §4."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -114,11 +114,17 @@ def test_consistency_requires_ref_and_others_reject_ref():
         )
 
 
-def test_spoken_at_must_be_timezone_aware():
+def test_spoken_at_must_be_utc_aware():
     with pytest.raises(ValueError):
         Utterance(
             question_number=1, parent_question_number=1, speaker=Speaker.CANDIDATE,
             content="답변", spoken_at=datetime(2026, 7, 24, 9, 0, 0),
+        )
+    kst = timezone(timedelta(hours=9))
+    with pytest.raises(ValueError):
+        Utterance(
+            question_number=1, parent_question_number=1, speaker=Speaker.CANDIDATE,
+            content="답변", spoken_at=datetime(2026, 7, 24, 9, 0, 0, tzinfo=kst),
         )
 
 
