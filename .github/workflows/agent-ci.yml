@@ -16,6 +16,19 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+
+    services:
+      # 대화 로그 write-through 테스트용 — 로컬에서 없으면 해당 테스트만 skip, CI에서는 전부 실행
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
     steps:
       - uses: actions/checkout@v4
 
