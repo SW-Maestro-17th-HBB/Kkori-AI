@@ -1,13 +1,16 @@
 import asyncio
 import logging
 import os
+from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 from livekit import agents
 from livekit.agents import Agent, AgentServer, AgentSession, TurnHandlingOptions, inference
 
 from src.config import (
+    INTERVIEW_LLM_MODEL,
     LLM_MODEL,
+    ORCHESTRATOR_LLM_MODEL,
     PARTICIPANT_WAIT_TIMEOUT_SECONDS,
     STT_LANGUAGE,
     STT_MODEL,
@@ -15,8 +18,13 @@ from src.config import (
     TTS_MODEL,
     TTS_VOICE,
 )
+from src.interview.conversation_log import ConversationLog
 from src.interview.initial_question import initial_utterance, select_initial_question
+from src.interview.orchestrator import decide
 from src.interview.prompts import INTERVIEWER_INSTRUCTIONS
+from src.interview.question_generation import generate_question
+from src.interview.redis_sink import create_transcript_writer
+from src.interview.turn_pipeline import SpeechResult, TurnPipeline
 from src.session_context import parse_job_metadata
 
 load_dotenv()
@@ -25,8 +33,41 @@ logger = logging.getLogger(__name__)
 
 
 class InterviewerAgent(Agent):
-    def __init__(self) -> None:
+    def __init__(self, pipeline: TurnPipeline) -> None:
         super().__init__(instructions=INTERVIEWER_INSTRUCTIONS)
+        self._pipeline = pipeline
+
+    async def on_user_turn_completed(self, turn_ctx, new_message) -> None:
+        # 훅은 답변 커밋·세대 증가만 하고 즉시 반환한다 — 프레임워크가 이전 훅 완료를
+        # 기다리므로, 파이프라인(판단→생성→발화)은 훅 밖의 독립 task로 실행된다.
+        self._pipeline.on_user_turn_completed(new_message.text_content or "")
+
+
+def _make_say_fn(session: AgentSession):
+    async def say(text: str) -> SpeechResult:
+        # spokenAt = agent가 speaking 상태로 전환된 관측 시각 (공개 이벤트만 사용).
+        # 재생 시도별로 future를 새로 만들고 완료 후 구독을 해제한다 — 첫 시도의
+        # 이벤트가 재시도의 시각으로 잘못 연결되지 않게.
+        started: asyncio.Future = asyncio.get_running_loop().create_future()
+
+        def on_state_changed(ev) -> None:
+            if getattr(ev, "new_state", None) == "speaking" and not started.done():
+                started.set_result(datetime.now(timezone.utc))
+
+        session.on("agent_state_changed", on_state_changed)
+        try:
+            # add_to_chat_ctx=False — llm 미사용이어도 프레임워크 내부 ChatContext에
+            # 면접관 발화가 축적되지 않게 한다(컨텍스트는 대화 로그가 단일 원천)
+            handle = session.say(text, allow_interruptions=False, add_to_chat_ctx=False)
+            await handle  # SpeechHandle은 await으로 예외를 던지지 않는다
+        finally:
+            session.off("agent_state_changed", on_state_changed)
+        ok = handle.done() and not handle.interrupted and handle.exception() is None
+        return SpeechResult(
+            ok=ok, started_at=started.result() if started.done() else None
+        )
+
+    return say
 
 
 server = AgentServer()
@@ -34,8 +75,10 @@ server = AgentServer()
 
 @server.rtc_session()
 async def entrypoint(ctx: agents.JobContext) -> None:
+    session_id = None
     if ctx.job.metadata:
         session_context = parse_job_metadata(ctx.job.metadata)
+        session_id = session_context.session_id
         position = session_context.position
         resume_context = session_context.resume_context
     else:
@@ -58,24 +101,54 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             ctx.shutdown(reason="participant wait timeout")
             return
 
-    llm = inference.LLM(model=LLM_MODEL)
+    selection_llm = inference.LLM(model=LLM_MODEL)
 
-    # 초기 질문은 세션 시작(마이크 입력·자동 턴 처리 활성화) 전에 확정한다 —
-    # 선택 LLM 호출이 걸리는 동안 자동 턴 응답과 첫 질문이 경쟁하지 않도록.
+    # 초기 질문은 세션 시작(마이크 입력·턴 처리 활성화) 전에 확정한다 —
     # LLM은 목록에서 번호만 고르고, 발화는 인사말 + 목록 원문으로 조립한다.
     question = await select_initial_question(
-        llm, position=position, resume_context=resume_context
+        selection_llm, position=position, resume_context=resume_context
     )
 
+    orchestrator_llm = inference.LLM(model=ORCHESTRATOR_LLM_MODEL)
+    interview_llm = inference.LLM(model=INTERVIEW_LLM_MODEL)
+
+    # llm 미지정 — 훅 실행 후 프레임워크가 기본 응답 생성을 건너뛴다(이중 발화 차단).
+    # 본론 질문은 TurnPipeline이 세션 밖 LLM으로 생성해 say()로 발화한다.
+    # TurnDetector는 VAD가 없으면 비활성화되므로 vad를 반드시 전달한다.
     session = AgentSession(
         stt=inference.STT(model=STT_MODEL, language=STT_LANGUAGE),
-        llm=llm,
         tts=inference.TTS(model=TTS_MODEL, voice=TTS_VOICE, language=TTS_LANGUAGE),
+        vad=inference.VAD(),
         turn_handling=TurnHandlingOptions(turn_detection=inference.TurnDetector()),
     )
-    await session.start(room=ctx.room, agent=InterviewerAgent())
 
-    await session.say(initial_utterance(question))
+    pipeline = TurnPipeline(
+        log=ConversationLog(),
+        writer=create_transcript_writer(session_id),
+        orchestrator_fn=lambda log: decide(orchestrator_llm, log),
+        generate_fn=lambda decision, log: generate_question(
+            interview_llm, decision, log, resume_context=resume_context
+        ),
+        say_fn=_make_say_fn(session),
+        shutdown_fn=lambda: ctx.shutdown(reason="tts playout failure"),
+    )
+
+    async def cleanup() -> None:
+        # entrypoint는 초기 발화 후 반환해도 세션은 계속 동작한다 —
+        # 정리는 실제 job shutdown 시점에만 수행한다(aclose는 멱등)
+        await pipeline.aclose()
+        await asyncio.gather(
+            selection_llm.aclose(),
+            orchestrator_llm.aclose(),
+            interview_llm.aclose(),
+            return_exceptions=True,
+        )
+
+    ctx.add_shutdown_callback(cleanup)
+
+    await session.start(room=ctx.room, agent=InterviewerAgent(pipeline))
+
+    await pipeline.speak_initial(initial_utterance(question))
 
 
 if __name__ == "__main__":
