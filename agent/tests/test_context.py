@@ -104,6 +104,9 @@ def test_per_utterance_cap_clips_only_at_injection():
     assert "…(중략)" in text
     assert log.utterances[-1].content == long_answer  # 로그 원문은 보존
 
+    clipped_line = text.splitlines()[-1].removeprefix("[A1] ")
+    assert estimate_tokens(clipped_line) <= 10  # 절단 표식 포함 결과가 상한 이하
+
 
 def test_empty_log_serializes_to_empty():
     assert orchestrator_context(ConversationLog(), token_budget=WIDE, utterance_token_cap=WIDE) == ""

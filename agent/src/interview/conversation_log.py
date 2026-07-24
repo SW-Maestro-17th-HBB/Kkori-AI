@@ -139,6 +139,16 @@ class ConversationLog:
     ) -> Utterance:
         if question_number != self.last_question_number() + 1:
             raise ValueError("questionNumber는 공백·역전 없이 1씩 증가해야 한다")
+        if question_type is QuestionType.FOLLOW_UP:
+            # parent는 체인(직전 꼬리질문)이 아니라 현재 줄기의 루트여야 한다 (PRD §4)
+            root = self.question_for(parent_question_number)
+            if root is None or root.question_type not in (
+                QuestionType.INITIAL,
+                QuestionType.TOPIC,
+            ):
+                raise ValueError("꼬리질문의 parent는 존재하는 줄기 루트(initial·topic)여야 한다")
+            if parent_question_number != self.current_root():
+                raise ValueError("꼬리질문은 현재 줄기에만 붙는다 — 이전 줄기 루트 참조 불가")
         utterance = Utterance(
             question_number=question_number,
             parent_question_number=parent_question_number,

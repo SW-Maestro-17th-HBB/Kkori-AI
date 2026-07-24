@@ -30,7 +30,11 @@ def _clip(content: str, cap_tokens: int) -> str:
     max_chars = int(cap_tokens * _CHARS_PER_TOKEN)
     if len(content) <= max_chars:
         return content
-    return content[:max_chars] + _CLIP_MARKER
+    # 절단 표식 길이를 본문 예산에서 미리 빼서 결과가 상한을 넘지 않게 한다
+    keep = max_chars - len(_CLIP_MARKER)
+    if keep <= 0:
+        return content[:max_chars]
+    return content[:keep] + _CLIP_MARKER
 
 
 def _tagged_line(utterance: Utterance, cap_tokens: int) -> str:

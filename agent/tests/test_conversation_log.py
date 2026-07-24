@@ -171,6 +171,44 @@ def test_answer_before_any_question_is_rejected():
         ConversationLog().append_answer("답변", NOW)
 
 
+def test_followup_chain_parent_is_rejected():
+    """꼬리질문의 꼬리질문도 parent는 줄기 루트 — 직전 꼬리질문 참조(체인)는 거부."""
+    log = ConversationLog()
+    log.append_question(
+        question_number=1, parent_question_number=1,
+        question_type=QuestionType.TOPIC, content="주제", spoken_at=NOW,
+    )
+    log.append_question(
+        question_number=2, parent_question_number=1,
+        question_type=QuestionType.FOLLOW_UP, content="꼬리", spoken_at=NOW,
+        follow_up_type=FollowUpType.DEEPEN,
+    )
+    with pytest.raises(ValueError):
+        log.append_question(
+            question_number=3, parent_question_number=2,  # 체인 — Q2는 루트가 아님
+            question_type=QuestionType.FOLLOW_UP, content="꼬리의 꼬리", spoken_at=NOW,
+            follow_up_type=FollowUpType.DEEPEN,
+        )
+
+
+def test_followup_to_previous_branch_root_is_rejected():
+    log = ConversationLog()
+    log.append_question(
+        question_number=1, parent_question_number=1,
+        question_type=QuestionType.TOPIC, content="주제1", spoken_at=NOW,
+    )
+    log.append_question(
+        question_number=2, parent_question_number=2,
+        question_type=QuestionType.TOPIC, content="주제2", spoken_at=NOW,
+    )
+    with pytest.raises(ValueError):
+        log.append_question(
+            question_number=3, parent_question_number=1,  # 이전 줄기 루트 — 현재 줄기 아님
+            question_type=QuestionType.FOLLOW_UP, content="꼬리", spoken_at=NOW,
+            follow_up_type=FollowUpType.DEEPEN,
+        )
+
+
 # --- 조회 ---
 
 def test_branch_queries():
