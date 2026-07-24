@@ -83,16 +83,25 @@ async def decide(llm: agents_llm.LLM, log: ConversationLog) -> Decision:
                 if chunk.delta and chunk.delta.content:
                     text += chunk.delta.content
         parsed = OrchestratorDecision.model_validate_json(text)
-    except Exception:
-        # 출력 원문은 기록하지 않는다 — 답변 인용이 섞일 수 있음
-        logger.warning("Orchestrator 호출·구조화 파싱 실패 — NEXT_TOPIC 폴백", exc_info=True)
+    except Exception as exc:
+        # 예외 객체를 기록하지 않는다 — ValidationError의 input_value 등에
+        # 답변 원문·개인정보가 그대로 담길 수 있다 (타입명만)
+        logger.warning(
+            "Orchestrator 호출·구조화 파싱 실패(%s) — NEXT_TOPIC 폴백", type(exc).__name__
+        )
+        return fallback_next_topic()
+
+    reason = parsed.reason.strip()
+    if not reason:
+        # "한 문장 판단 근거" 계약 위반 — reason 불변식을 지키기 위해 판단 자체를 폐기
+        logger.warning("Orchestrator reason이 비어 있음 — NEXT_TOPIC 폴백")
         return fallback_next_topic()
 
     if parsed.action == "NEXT_TOPIC":
         return Decision(
             action=Action.NEXT_TOPIC,
             source=DecisionSource.ORCHESTRATOR,
-            reason=parsed.reason,
+            reason=reason,
         )
 
     if parsed.followUpType is None:
@@ -113,7 +122,7 @@ async def decide(llm: agents_llm.LLM, log: ConversationLog) -> Decision:
         action=Action.FOLLOW_UP,
         source=DecisionSource.ORCHESTRATOR,
         follow_up_type=follow_up_type,
-        reason=parsed.reason,
+        reason=reason,
         ref_question_number=ref,
     )
 

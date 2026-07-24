@@ -97,6 +97,27 @@ def test_unknown_action_falls_back():
     assert decision.source is DecisionSource.FALLBACK
 
 
+def test_parse_failure_log_never_contains_answer_content(caplog):
+    # ValidationError의 input_value로 개인정보가 운영 로그에 새지 않아야 한다
+    sensitive = '{"reason": "주민번호 990101-1234567", "action": "잘못된값"}'
+    with caplog.at_level("WARNING"):
+        decision = _decide(sensitive)
+    assert decision.source is DecisionSource.FALLBACK
+    assert "990101-1234567" not in caplog.text
+
+
+def test_blank_reason_falls_back():
+    for reason in ("", "   "):
+        decision = _decide({"reason": reason, "action": "FOLLOW_UP", "followUpType": "DEEPEN"})
+        assert decision.source is DecisionSource.FALLBACK
+        assert decision.reason is None
+
+
+def test_reason_is_normalized():
+    decision = _decide({"reason": "  근거입니다  ", "action": "NEXT_TOPIC"})
+    assert decision.reason == "근거입니다"
+
+
 def test_follow_up_without_type_falls_back():
     decision = _decide({"reason": "r", "action": "FOLLOW_UP"})
     assert decision.action is Action.NEXT_TOPIC

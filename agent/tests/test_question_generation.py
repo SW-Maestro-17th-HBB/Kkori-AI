@@ -123,8 +123,11 @@ def test_abnormal_outputs_fall_back_to_vetted_pool():
         "",  # 빈 출력
         "   \n  ",  # 공백뿐
         "질" * (QUESTION_MAX_CHARS + 1),  # 길이 상한 초과
-        "다음 중 하나를 골라주세요.\n- 첫째\n- 둘째",  # 리스트 마커
-        "**중요한** 질문입니다.",  # 마크다운
+        "다음 중 하나를 골라주세요.\n- 첫째\n- 둘째",  # 불릿 목록
+        "1. 첫 번째 질문\n2. 두 번째 질문",  # 순서 목록
+        "> 인용 형식의 질문입니다.",  # 인용
+        "[질문](https://example.com)",  # 마크다운 링크
+        "**중요한** 질문입니다.",  # 마크다운 강조
     )
     for text in cases:
         result = _generate(_StubLLM(text), _deepen())

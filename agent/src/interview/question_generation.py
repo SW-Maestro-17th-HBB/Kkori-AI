@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import random
+import re
 from dataclasses import dataclass
 
 from livekit.agents import llm as agents_llm
@@ -31,7 +32,11 @@ from src.interview.prompts import (
 
 logger = logging.getLogger(__name__)
 
-_FORBIDDEN_MARKERS = ("#", "*", "`", "•")
+# 마크다운 조각 — 링크(]()까지 포함
+_FORBIDDEN_MARKERS = ("#", "*", "`", "•", "](")
+
+# 줄 시작의 목록·인용 마커 — 불릿(-), 순서 목록(1. / 1)), 인용(>)
+_LIST_LINE = re.compile(r"^(?:-|\d+[.)]|>)\s")
 
 
 @dataclass(frozen=True)
@@ -82,8 +87,9 @@ async def generate_question(
             async for chunk in stream:
                 if chunk.delta and chunk.delta.content:
                     text += chunk.delta.content
-    except Exception:
-        logger.warning("Interview 호출 실패 — 폴백 질문 발화", exc_info=True)
+    except Exception as exc:
+        # 예외 객체는 기록하지 않는다 — 요청 페이로드(답변 원문)가 담길 수 있다
+        logger.warning("Interview 호출 실패(%s) — 폴백 질문 발화", type(exc).__name__)
         return _fallback()
 
     question = text.strip()
@@ -117,10 +123,10 @@ def _ref_branch_text(log: ConversationLog, decision: Decision) -> str | None:
 
 
 def _has_forbidden_format(text: str) -> bool:
-    """음성 발화 불가 형식 — 마크다운·리스트 마커 휴리스틱."""
+    """음성 발화 불가 형식 — 마크다운·목록·인용 마커 휴리스틱."""
     if any(marker in text for marker in _FORBIDDEN_MARKERS):
         return True
-    return any(line.lstrip().startswith("- ") for line in text.splitlines())
+    return any(_LIST_LINE.match(line.lstrip()) for line in text.splitlines())
 
 
 def _fallback() -> GeneratedQuestion:
