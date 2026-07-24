@@ -1,9 +1,9 @@
 """본론 턴 흐름 제어 — single-flight 파이프라인. docs/prd/follow-up-question.md §1.
 
-turn 훅에서는 답변 커밋과 세대 증가만 하고 즉시 반환한다(프레임워크는 이전 훅이
-끝나기를 기다린다). Orchestrator→Interview는 훅 밖의 독립 task로 실행하고, 발화
-직전 세대 검사로 낡은 결과를 폐기한다(무효화 = 결과 폐기). 질문 번호는 예약하지
-않고 playout 성공 후 commit lock 안에서 부여한다 — 폐기된 generation이 번호를
+turn 훅에서는 답변 커밋과 턴 순번(turn_seq) 증가만 하고 즉시 반환한다(프레임워크는
+이전 훅이 끝나기를 기다린다). Orchestrator→Interview는 훅 밖의 독립 task로 실행하고,
+발화 직전 최신 턴 검사로 낡은 턴의 결과를 폐기한다(무효화 = 결과 폐기). 질문 번호는
+예약하지 않고 playout 성공 후 commit lock 안에서 부여한다 — 폐기된 실행이 번호를
 소모하지 않아 공백·역전이 없다. 어떤 LLM 실패에서도 턴이 침묵으로 끝나지 않으며,
 TTS 재시도 소진 시에만 잡을 종료한다(침묵 방치 금지).
 """
@@ -63,7 +63,7 @@ class TurnPipeline:
         self._writer = writer
         self._max_followups = max_followups_per_branch
         self._clock = clock
-        self._generation = 0
+        self._turn_seq = 0
         self._tasks: set[asyncio.Task] = set()
         self._commit_lock = asyncio.Lock()
         self._closed = False
@@ -71,7 +71,7 @@ class TurnPipeline:
     # --- turn 훅 경로 (최소 작업 후 즉시 반환) ---
 
     def on_user_turn_completed(self, answer_text: str) -> None:
-        """답변 즉시 커밋 + 세대 증가 + 독립 task 시작. 훅은 여기서 끝난다."""
+        """답변 즉시 커밋 + 턴 순번 증가 + 독립 task 시작. 훅은 여기서 끝난다."""
         if self._closed:
             return
         text = answer_text.strip()
@@ -83,14 +83,14 @@ class TurnPipeline:
             logger.warning("질문 전 발화 수신 — 답변으로 처리하지 않음")
             return
         self._commit(self._log.append_answer(text, self._clock()))
-        self._generation += 1
-        self._spawn(self._run(self._generation))
+        self._turn_seq += 1
+        self._spawn(self._run(self._turn_seq))
 
     # --- 초기 발화 (같은 재생·커밋 경로 — 발화 객체 #1) ---
 
     async def speak_initial(self, text: str) -> None:
         await self._speak_and_commit(
-            generation=self._generation,
+            turn_seq=self._turn_seq,
             text=text,
             question_type=QuestionType.INITIAL,
             follow_up_type=None,
@@ -100,12 +100,12 @@ class TurnPipeline:
 
     # --- 본론 파이프라인 (독립 task) ---
 
-    async def _run(self, generation: int) -> None:
-        decision = await self._decide(generation)
-        if self._is_stale(generation):
+    async def _run(self, turn_seq: int) -> None:
+        decision = await self._decide()
+        if self._is_stale(turn_seq):
             return
         generated = await self._generate(decision)
-        if self._is_stale(generation):
+        if self._is_stale(turn_seq):
             return  # 폐기 — 번호 미소모 (답변은 이미 커밋돼 유실 없음)
 
         is_followup = decision.action is Action.FOLLOW_UP and not generated.is_fallback
@@ -113,7 +113,7 @@ class TurnPipeline:
             decision.source is DecisionSource.ORCHESTRATOR and not generated.is_fallback
         )
         await self._speak_and_commit(
-            generation=generation,
+            turn_seq=turn_seq,
             text=generated.text,
             question_type=QuestionType.FOLLOW_UP if is_followup else QuestionType.TOPIC,
             follow_up_type=decision.follow_up_type if is_followup else None,
@@ -121,7 +121,7 @@ class TurnPipeline:
             ref_question_number=decision.ref_question_number if is_followup else None,
         )
 
-    async def _decide(self, generation: int) -> Decision:
+    async def _decide(self) -> Decision:
         """코드 우선 결정 — 첫 답변·상한 강제는 Orchestrator를 호출하지 않는다."""
         if not self._log.has_topic_or_followup_question():
             return forced_next_topic()
@@ -146,24 +146,24 @@ class TurnPipeline:
     async def _speak_and_commit(
         self,
         *,
-        generation: int,
+        turn_seq: int,
         text: str,
         question_type: QuestionType,
         follow_up_type: FollowUpType | None,
         reason: str | None,
         ref_question_number: int | None,
     ) -> None:
-        """say 직전 세대 검사 → playout 성공 후 lock 안에서 번호 부여·커밋.
+        """say 직전 최신 턴 검사 → playout 성공 후 lock 안에서 번호 부여·커밋.
 
         playout이 성공하면 지원자가 실제로 들은 질문이므로 이후에는 무조건 커밋한다
         (transcript = 실제 들은 발화). TTS 실패는 같은 질문을 처음부터 1회 재시도하고,
         소진되면 잡을 종료한다.
         """
-        if self._is_stale(generation):
+        if self._is_stale(turn_seq):
             return
         result = await self._try_say(text)
         if not result.ok:
-            if self._is_stale(generation):
+            if self._is_stale(turn_seq):
                 return
             logger.warning("질문 재생 실패 — 같은 질문 처음부터 재시도")
             result = await self._try_say(text)
@@ -211,8 +211,9 @@ class TurnPipeline:
             except Exception as exc:
                 logger.warning("전사 enqueue 실패(%s) — 면접은 계속", type(exc).__name__)
 
-    def _is_stale(self, generation: int) -> bool:
-        return self._closed or generation != self._generation
+    def _is_stale(self, turn_seq: int) -> bool:
+        """최신 턴 검사 — 실행 중 새 답변 턴이 도착했으면(순번 증가) 낡은 실행이다."""
+        return self._closed or turn_seq != self._turn_seq
 
     def _spawn(self, coro) -> None:
         task = asyncio.create_task(coro)
@@ -228,11 +229,11 @@ class TurnPipeline:
             )
 
     async def aclose(self) -> None:
-        """세대 무효화 → task 정리 → writer drain·종료. 멱등 — job shutdown 시점에 호출."""
+        """턴 순번 무효화 → task 정리 → writer drain·종료. 멱등 — job shutdown 시점에 호출."""
         if self._closed:
             return
         self._closed = True
-        self._generation += 1
+        self._turn_seq += 1
         for task in list(self._tasks):
             task.cancel()
         if self._tasks:

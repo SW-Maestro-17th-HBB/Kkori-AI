@@ -203,9 +203,9 @@ def test_fallback_generation_is_treated_as_new_topic_without_reason():
     assert question.follow_up_type is None and question.reason is None
 
 
-# --- single-flight·세대 폐기 ---
+# --- single-flight·낡은 턴 폐기 ---
 
-def test_new_turn_discards_stale_generation_without_consuming_numbers():
+def test_new_turn_discards_stale_task_without_consuming_numbers():
     gate = asyncio.Event()
     env = _make(orch=_OrchSpy(gate=gate))
 
