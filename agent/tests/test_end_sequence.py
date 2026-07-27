@@ -107,7 +107,8 @@ def test_hanging_writer_close_is_bounded_by_timeout():
         delete_room_fn=rec.step("delete"),
         step_timeout_seconds=0.01,
     )
-    asyncio.run(seq.run(EndCause.USER_REQUEST))
+    # 외부 watchdog — 내부 타임아웃이 회귀하면 1시간 대기가 아니라 즉시 실패한다
+    asyncio.run(asyncio.wait_for(seq.run(EndCause.USER_REQUEST), timeout=0.5))
     assert rec.events == ["flush", "delete"]  # writer hang이 시퀀스를 막지 않는다
     assert rec.shutdowns == ["interview end: USER_REQUEST"]
 
@@ -120,7 +121,8 @@ def test_hanging_step_is_bounded_by_timeout():
         delete_room_fn=rec.step("delete"),
         step_timeout_seconds=0.01,
     )
-    asyncio.run(seq.run(EndCause.USER_REQUEST))
+    # 외부 watchdog — 내부 타임아웃이 회귀하면 1시간 대기가 아니라 즉시 실패한다
+    asyncio.run(asyncio.wait_for(seq.run(EndCause.USER_REQUEST), timeout=0.5))
     assert rec.events == ["delete"]  # hang한 flush는 타임아웃으로 실패 처리
     assert rec.shutdowns == ["interview end: USER_REQUEST"]
 
