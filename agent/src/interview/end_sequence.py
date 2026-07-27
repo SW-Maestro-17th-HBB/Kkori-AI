@@ -64,7 +64,9 @@ class EndSequence:
         if self._writer is None:
             return
         try:
-            await self._writer.aclose()
+            # 주입된 writer의 내부 구현에 유한 시간을 의존하지 않는다 —
+            # drain이 hang해도 종료 시퀀스는 단계 타임아웃 안에 계속된다
+            await asyncio.wait_for(self._writer.aclose(), self._step_timeout)
         except Exception as exc:
             logger.warning("전사 writer 종료 실패(%s) — 계속", type(exc).__name__)
 

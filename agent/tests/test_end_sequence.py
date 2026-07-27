@@ -93,6 +93,25 @@ def test_room_delete_retries_bounded_then_exits():
     assert rec.shutdowns == ["interview end: HARD_TIMEOUT"]  # 소진에도 퇴장 보장
 
 
+def test_hanging_writer_close_is_bounded_by_timeout():
+    rec = _Recorder()
+
+    class _HangingWriter:
+        async def aclose(self):
+            await asyncio.sleep(3600)
+
+    seq = _sequence(
+        rec,
+        writer=_HangingWriter(),
+        flush_fn=rec.step("flush", result=True),
+        delete_room_fn=rec.step("delete"),
+        step_timeout_seconds=0.01,
+    )
+    asyncio.run(seq.run(EndCause.USER_REQUEST))
+    assert rec.events == ["flush", "delete"]  # writer hang이 시퀀스를 막지 않는다
+    assert rec.shutdowns == ["interview end: USER_REQUEST"]
+
+
 def test_hanging_step_is_bounded_by_timeout():
     rec = _Recorder()
     seq = _sequence(
