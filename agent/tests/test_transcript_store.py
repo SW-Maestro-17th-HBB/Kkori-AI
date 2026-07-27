@@ -110,3 +110,59 @@ def test_flush_skipped_without_database_config(monkeypatch):
 def test_flush_rejects_non_numeric_session_id(monkeypatch):
     monkeypatch.setenv(DATABASE_URL_ENV, LOCAL_URL)
     assert asyncio.run(flush_transcript("console-test", _sample_content())) is False
+
+
+# --- 재시도 계약 (실패 시 1회 재시도 — PRD §4) ---
+
+class _FakeConn:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    async def execute(self, sql, params):
+        return None
+
+
+def _fake_connect(monkeypatch, *, fail_first=False, fail_all=False, hang_first=False):
+    """psycopg.AsyncConnection.connect를 대체해 호출 횟수를 기록한다."""
+    import src.interview.transcript_store as store
+
+    calls = {"n": 0}
+
+    class _FakeConnection:
+        @staticmethod
+        async def connect(url, **kwargs):
+            calls["n"] += 1
+            if hang_first and calls["n"] == 1:
+                await asyncio.sleep(3600)
+            if fail_all or (fail_first and calls["n"] == 1):
+                raise RuntimeError("transient")
+            return _FakeConn()
+
+    monkeypatch.setattr(store.psycopg, "AsyncConnection", _FakeConnection)
+    monkeypatch.setenv(DATABASE_URL_ENV, "postgresql://irrelevant:5432/db")
+    return calls
+
+
+def test_flush_retries_once_then_succeeds(monkeypatch):
+    calls = _fake_connect(monkeypatch, fail_first=True)
+    assert asyncio.run(flush_transcript("123", [])) is True
+    assert calls["n"] == 2  # 1차 실패 → 정확히 1회 재시도
+
+
+def test_flush_exhausts_after_exactly_two_attempts(monkeypatch):
+    calls = _fake_connect(monkeypatch, fail_all=True)
+    assert asyncio.run(flush_transcript("123", [])) is False
+    assert calls["n"] == 2  # 재시도 소진 — 3회 이상 시도하지 않는다
+
+
+def test_hanging_attempt_is_bounded_and_retried(monkeypatch):
+    import src.interview.transcript_store as store
+
+    # 시도당 상한 — connect_timeout이 못 잡는 hang도 재시도 계약을 죽이지 않는다
+    monkeypatch.setattr(store, "_ATTEMPT_TIMEOUT_SECONDS", 0.01)
+    calls = _fake_connect(monkeypatch, hang_first=True)
+    assert asyncio.run(flush_transcript("123", [])) is True
+    assert calls["n"] == 2  # hang한 1차 시도가 취소되고 2차가 성공한다
