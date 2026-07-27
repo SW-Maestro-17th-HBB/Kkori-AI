@@ -8,6 +8,8 @@ from livekit import agents
 from livekit.agents import Agent, AgentServer, AgentSession, TurnHandlingOptions, inference
 
 from src.config import (
+    HARD_OVERRUN_GRACE_SECONDS,
+    INTERVIEW_DURATION_SECONDS,
     INTERVIEW_LLM_MODEL,
     LLM_MODEL,
     ORCHESTRATOR_LLM_MODEL,
@@ -17,9 +19,12 @@ from src.config import (
     TTS_LANGUAGE,
     TTS_MODEL,
     TTS_VOICE,
+    WRAP_UP_REMAINING_SECONDS,
 )
 from src.interview.conversation_log import ConversationLog
+from src.interview.end_state import EndCause
 from src.interview.initial_question import initial_utterance, select_initial_question
+from src.interview.interview_clock import InterviewClock
 from src.interview.orchestrator import decide
 from src.interview.prompts import INTERVIEWER_INSTRUCTIONS
 from src.interview.question_generation import generate_question
@@ -108,6 +113,14 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             ctx.shutdown(reason="participant wait timeout")
             return
 
+    # 면접 시작 기준 시각 = candidate 입장 관측 시점 (docs/prd/interview-end.md §1)
+    interview_clock = InterviewClock(
+        duration_seconds=INTERVIEW_DURATION_SECONDS,
+        wrap_up_remaining_seconds=WRAP_UP_REMAINING_SECONDS,
+        hard_grace_seconds=HARD_OVERRUN_GRACE_SECONDS,
+    )
+    interview_clock.start()
+
     selection_llm = inference.LLM(model=LLM_MODEL)
 
     # 초기 질문은 세션 시작(마이크 입력·턴 처리 활성화) 전에 확정한다 —
@@ -129,6 +142,11 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         turn_handling=TurnHandlingOptions(turn_detection=inference.TurnDetector()),
     )
 
+    async def on_closing(cause: EndCause) -> None:
+        # 클로징 발화(HBB1-285)·종료 시퀀스(HBB1-286) 구현 전까지의 임시 동작 —
+        # 종료 국면에 들어간 세션을 침묵으로 방치하지 않고 잡을 종료한다
+        ctx.shutdown(reason=f"interview end: {cause}")
+
     pipeline = TurnPipeline(
         log=ConversationLog(),
         writer=create_transcript_writer(session_id),
@@ -137,7 +155,9 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             interview_llm, decision, log, resume_context=resume_context
         ),
         say_fn=_make_say_fn(session),
-        shutdown_fn=lambda: ctx.shutdown(reason="tts playout failure"),
+        shutdown_fn=lambda reason: ctx.shutdown(reason=reason),
+        interview_clock=interview_clock,
+        closing_fn=on_closing,
     )
 
     async def cleanup() -> None:
@@ -156,6 +176,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     await session.start(room=ctx.room, agent=InterviewerAgent(pipeline))
 
     await pipeline.speak_initial(initial_utterance(question))
+    pipeline.start_time_guard()
 
 
 if __name__ == "__main__":

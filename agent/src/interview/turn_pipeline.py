@@ -25,6 +25,8 @@ from src.interview.conversation_log import (
     QuestionType,
     Utterance,
 )
+from src.interview.end_state import EndCause, EndPhase, EndState
+from src.interview.interview_clock import InterviewClock
 from src.interview.orchestrator import Decision, DecisionSource, forced_next_topic
 from src.interview.prompts import FALLBACK_QUESTIONS
 from src.interview.question_generation import GeneratedQuestion
@@ -50,10 +52,13 @@ class TurnPipeline:
         orchestrator_fn: Callable[[ConversationLog], Awaitable[Decision]],
         generate_fn: Callable[[Decision, ConversationLog], Awaitable[GeneratedQuestion]],
         say_fn: Callable[[str], Awaitable[SpeechResult]],
-        shutdown_fn: Callable[[], None],
+        shutdown_fn: Callable[[str], None],
         writer=None,
         max_followups_per_branch: int = MAX_FOLLOWUPS_PER_BRANCH,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        end_state: EndState | None = None,
+        interview_clock: InterviewClock | None = None,
+        closing_fn: Callable[[EndCause], Awaitable[None]] | None = None,
     ) -> None:
         self._log = log
         self._orchestrator_fn = orchestrator_fn
@@ -63,16 +68,34 @@ class TurnPipeline:
         self._writer = writer
         self._max_followups = max_followups_per_branch
         self._clock = clock
+        self._end_state = end_state or EndState()
+        self._interview_clock = interview_clock
+        self._closing_fn = closing_fn
         self._turn_seq = 0
         self._tasks: set[asyncio.Task] = set()
         self._commit_lock = asyncio.Lock()
+        self._speech_lock = asyncio.Lock()  # 발화 직렬화 — 클로징이 진행 중 재생을 자르지 않는다
         self._closed = False
+
+    @property
+    def end_state(self) -> EndState:
+        return self._end_state
 
     # --- turn 훅 경로 (최소 작업 후 즉시 반환) ---
 
     def on_user_turn_completed(self, answer_text: str) -> None:
-        """답변 즉시 커밋 + 턴 순번 증가 + 독립 task 시작. 훅은 여기서 끝난다."""
+        """답변 커밋 + 턴 순번 증가 + 독립 task 시작. 훅은 여기서 끝난다.
+
+        이 메서드는 await 없는 동기 실행이라 상태 확인→커밋→전이가 하나의
+        임계구역이다 — 확인과 커밋 사이에 다른 task(hard 타이머 등)가 끼어들
+        수 없다(docs/prd/interview-end.md §1 커밋 정책).
+        """
         if self._closed:
+            return
+        phase = self._end_state.phase
+        if phase >= EndPhase.CLOSING:
+            # CLOSING 진입 이후 발화는 어떤 경로에서도 커밋하지 않는다
+            logger.info("종료 국면(%s) 중 발화 — 답변으로 처리하지 않음", phase.name)
             return
         text = answer_text.strip()
         if not text:
@@ -82,9 +105,62 @@ class TurnPipeline:
             # 초기 질문 발화 전의 발화는 답변이 아니다 (경쟁 창 방어)
             logger.warning("질문 전 발화 수신 — 답변으로 처리하지 않음")
             return
+        if phase is EndPhase.WAITING_FINAL_ANSWER:
+            # 전이 트리거 계약(HBB1-285): 이 상태는 마지막 질문의 playout 성공·커밋
+            # 이후에만 진입한다 — 따라서 이 turn은 마지막 질문에 대한 답변이다.
+            # 마지막 답변 1회만 커밋하고 CLOSING으로 — 커밋과 전이가 같은 임계구역
+            self._commit(self._log.append_answer(text, self._clock()))
+            if self._end_state.try_advance(EndPhase.CLOSING, EndCause.FINAL_QUESTION):
+                self._spawn(self._closing_task())
+            return
         self._commit(self._log.append_answer(text, self._clock()))
         self._turn_seq += 1
         self._spawn(self._run(self._turn_seq))
+
+    # --- 종료 국면 (docs/prd/interview-end.md §1) ---
+
+    def begin_closing(self, cause: EndCause) -> bool:
+        """CLOSING 직행 수렴점(END 판단·hard·사용자 종료) — 승자만 클로징을 1회 시작한다."""
+        if self._closed:
+            return False
+        if self._end_state.try_advance(EndPhase.CLOSING, cause):
+            self._spawn(self._closing_task())
+            return True
+        return False
+
+    def start_time_guard(self) -> None:
+        """hard 안전망 타이머 시작 — 면접 시계 start() 이후 호출한다."""
+        if self._interview_clock is None:
+            logger.warning("면접 시계 미주입 — hard 안전망 비활성")
+            return
+        self._spawn(self._guard_hard_limit())
+
+    async def _guard_hard_limit(self) -> None:
+        while not self._closed and self._end_state.phase < EndPhase.CLOSING:
+            delay = self._interview_clock.hard_deadline_in()
+            if delay <= 0:
+                logger.warning("hard 시간 초과 — 강제 클로징")
+                self.begin_closing(EndCause.HARD_TIMEOUT)
+                return
+            await asyncio.sleep(delay)
+
+    async def _closing_task(self) -> None:
+        """CLOSING 진입 부수효과 — 클로징 발화(HBB1-285)·종료 시퀀스(HBB1-286)가
+        closing_fn을 채운다. 원인은 전이 승자가 이미 확정한 값이다."""
+        cause = self._end_state.cause
+        logger.info("종료 국면 진입 — 원인=%s", cause)
+        # 진행 중 발화(질문 재생)가 있으면 완료를 기다린다 — 재생을 자르지 않는다
+        # (PRD §1 hard). lock을 기다리던 다른 발화 실행은 stale 검사로 폐기된다.
+        async with self._speech_lock:
+            pass
+        if self._closing_fn is None:
+            return
+        try:
+            await self._closing_fn(cause)
+        except Exception as exc:
+            # 클로징 실패로 세션이 침묵에 머물지 않게 한다 — 최후 fallback은 잡 종료
+            logger.error("클로징 처리 예외(%s) — 잡 종료 fallback", type(exc).__name__)
+            self._shutdown_fn("closing failure")
 
     # --- 초기 발화 (같은 재생·커밋 경로 — 발화 객체 #1) ---
 
@@ -161,16 +237,21 @@ class TurnPipeline:
         """
         if self._is_stale(turn_seq):
             return
-        result = await self._try_say(text)
-        if not result.ok:
+        async with self._speech_lock:
+            # lock 대기 중 낡아진 실행(새 턴·종료 국면 진입)은 발화 없이 폐기한다 —
+            # 클로징이 재생 완료를 기다린 뒤 새 질문이 이어서 재생되는 것을 막는다
             if self._is_stale(turn_seq):
                 return
-            logger.warning("질문 재생 실패 — 같은 질문 처음부터 재시도")
             result = await self._try_say(text)
             if not result.ok:
-                logger.error("TTS 재시도 소진 — 세션 진행 불가, 잡을 종료한다")
-                self._shutdown_fn()
-                return
+                if self._is_stale(turn_seq):
+                    return
+                logger.warning("질문 재생 실패 — 같은 질문 처음부터 재시도")
+                result = await self._try_say(text)
+                if not result.ok:
+                    logger.error("TTS 재시도 소진 — 세션 진행 불가, 잡을 종료한다")
+                    self._shutdown_fn("tts playout failure")
+                    return
 
         async with self._commit_lock:
             number = self._log.last_question_number() + 1
@@ -212,8 +293,16 @@ class TurnPipeline:
                 logger.warning("전사 enqueue 실패(%s) — 면접은 계속", type(exc).__name__)
 
     def _is_stale(self, turn_seq: int) -> bool:
-        """최신 턴 검사 — 실행 중 새 답변 턴이 도착했으면(순번 증가) 낡은 실행이다."""
-        return self._closed or turn_seq != self._turn_seq
+        """최신 턴 검사 — 새 답변 턴 도착(순번 증가) 또는 `RUNNING` 이탈이면 낡은 실행이다.
+
+        질문 생성 파이프라인은 RUNNING에서만 유효하다 — 종료 국면 진입과 함께
+        진행 중 실행의 결과는 폐기된다(docs/prd/interview-end.md §1).
+        """
+        return (
+            self._closed
+            or turn_seq != self._turn_seq
+            or self._end_state.phase is not EndPhase.RUNNING
+        )
 
     def _spawn(self, coro) -> None:
         task = asyncio.create_task(coro)
