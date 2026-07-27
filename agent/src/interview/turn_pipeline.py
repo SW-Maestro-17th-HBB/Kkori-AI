@@ -74,6 +74,7 @@ class TurnPipeline:
         self._turn_seq = 0
         self._tasks: set[asyncio.Task] = set()
         self._commit_lock = asyncio.Lock()
+        self._speech_lock = asyncio.Lock()  # 발화 직렬화 — 클로징이 진행 중 재생을 자르지 않는다
         self._closed = False
 
     @property
@@ -105,6 +106,8 @@ class TurnPipeline:
             logger.warning("질문 전 발화 수신 — 답변으로 처리하지 않음")
             return
         if phase is EndPhase.WAITING_FINAL_ANSWER:
+            # 전이 트리거 계약(HBB1-285): 이 상태는 마지막 질문의 playout 성공·커밋
+            # 이후에만 진입한다 — 따라서 이 turn은 마지막 질문에 대한 답변이다.
             # 마지막 답변 1회만 커밋하고 CLOSING으로 — 커밋과 전이가 같은 임계구역
             self._commit(self._log.append_answer(text, self._clock()))
             if self._end_state.try_advance(EndPhase.CLOSING, EndCause.FINAL_QUESTION):
@@ -146,12 +149,18 @@ class TurnPipeline:
         closing_fn을 채운다. 원인은 전이 승자가 이미 확정한 값이다."""
         cause = self._end_state.cause
         logger.info("종료 국면 진입 — 원인=%s", cause)
+        # 진행 중 발화(질문 재생)가 있으면 완료를 기다린다 — 재생을 자르지 않는다
+        # (PRD §1 hard). lock을 기다리던 다른 발화 실행은 stale 검사로 폐기된다.
+        async with self._speech_lock:
+            pass
         if self._closing_fn is None:
             return
         try:
             await self._closing_fn(cause)
         except Exception as exc:
-            logger.error("클로징 처리 예외(%s)", type(exc).__name__)
+            # 클로징 실패로 세션이 침묵에 머물지 않게 한다 — 최후 fallback은 잡 종료
+            logger.error("클로징 처리 예외(%s) — 잡 종료 fallback", type(exc).__name__)
+            self._shutdown_fn()
 
     # --- 초기 발화 (같은 재생·커밋 경로 — 발화 객체 #1) ---
 
@@ -228,16 +237,21 @@ class TurnPipeline:
         """
         if self._is_stale(turn_seq):
             return
-        result = await self._try_say(text)
-        if not result.ok:
+        async with self._speech_lock:
+            # lock 대기 중 낡아진 실행(새 턴·종료 국면 진입)은 발화 없이 폐기한다 —
+            # 클로징이 재생 완료를 기다린 뒤 새 질문이 이어서 재생되는 것을 막는다
             if self._is_stale(turn_seq):
                 return
-            logger.warning("질문 재생 실패 — 같은 질문 처음부터 재시도")
             result = await self._try_say(text)
             if not result.ok:
-                logger.error("TTS 재시도 소진 — 세션 진행 불가, 잡을 종료한다")
-                self._shutdown_fn()
-                return
+                if self._is_stale(turn_seq):
+                    return
+                logger.warning("질문 재생 실패 — 같은 질문 처음부터 재시도")
+                result = await self._try_say(text)
+                if not result.ok:
+                    logger.error("TTS 재시도 소진 — 세션 진행 불가, 잡을 종료한다")
+                    self._shutdown_fn()
+                    return
 
         async with self._commit_lock:
             number = self._log.last_question_number() + 1

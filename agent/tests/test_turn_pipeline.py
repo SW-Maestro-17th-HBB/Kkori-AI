@@ -482,6 +482,56 @@ def test_leaving_running_discards_inflight_generation():
     assert closing.causes == [EndCause.USER_REQUEST]
 
 
+def test_closing_waits_for_inflight_playout_before_running():
+    say_gate = asyncio.Event()
+    closing = _ClosingSpy()
+
+    class _BlockingSay:
+        def __init__(self):
+            self.calls: list[str] = []
+
+        async def __call__(self, text):
+            self.calls.append(text)
+            if len(self.calls) >= 3:  # 본론 질문 재생부터 게이트에서 블록
+                await say_gate.wait()
+            return SpeechResult(ok=True, started_at=SPOKE_AT)
+
+    env = _make(say=_BlockingSay(), closing_fn=closing)
+
+    async def scenario():
+        await _bootstrap(env)
+        env.pipeline.on_user_turn_completed("본론 답변입니다.")
+        for _ in range(10):  # 질문 재생(say)이 블록될 때까지 양보
+            await asyncio.sleep(0)
+        env.pipeline.begin_closing(EndCause.HARD_TIMEOUT)
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert closing.causes == []  # 재생 완료 전에는 클로징이 시작되지 않는다
+        say_gate.set()
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    assert closing.causes == [EndCause.HARD_TIMEOUT]
+    # 재생이 완료된 질문은 실제로 들었으므로 커밋된다
+    assert env.log.utterances[-1].speaker is Speaker.INTERVIEWER
+
+
+def test_closing_exception_falls_back_to_shutdown():
+    class _FailingClosing:
+        async def __call__(self, cause):
+            raise RuntimeError("closing boom")
+
+    env = _make(closing_fn=_FailingClosing())
+
+    async def scenario():
+        await _bootstrap(env)
+        env.pipeline.begin_closing(EndCause.USER_REQUEST)
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    assert env.shutdowns == [True]  # 침묵 방치 금지 — 최후 fallback은 잡 종료
+
+
 def test_time_guard_forces_hard_closing_when_deadline_passed():
     closing = _ClosingSpy()
     now = {"t": 0.0}
