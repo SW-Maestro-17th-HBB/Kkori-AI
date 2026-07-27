@@ -48,3 +48,9 @@ def test_marker_written_with_cause_and_ttl(monkeypatch):
 def test_marker_skipped_without_redis_config(monkeypatch):
     monkeypatch.delenv(REDIS_URL_ENV, raising=False)
     assert asyncio.run(write_termination_marker("123", "USER_REQUEST")) is False
+
+
+def test_marker_returns_false_on_malformed_url(monkeypatch):
+    # 클라이언트 생성 실패(ValueError)도 예외 전파가 아니라 실패 반환이다
+    monkeypatch.setenv(REDIS_URL_ENV, "not-a-url")
+    assert asyncio.run(write_termination_marker("123", "USER_REQUEST")) is False
