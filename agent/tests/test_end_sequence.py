@@ -87,6 +87,7 @@ def test_room_delete_retries_bounded_then_exits():
         flush_fn=rec.step("flush", result=True),
         delete_room_fn=rec.step("delete", error=True),
         room_delete_max_attempts=2,
+        room_delete_backoff_seconds=0.001,  # 재시도 간 backoff — 테스트는 짧게
     )
     asyncio.run(seq.run(EndCause.HARD_TIMEOUT))
     assert rec.events == ["flush", "delete", "delete"]  # bounded retry 후 소진

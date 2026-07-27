@@ -17,7 +17,11 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 
-from src.config import END_STEP_TIMEOUT_SECONDS, ROOM_DELETE_MAX_ATTEMPTS
+from src.config import (
+    END_STEP_TIMEOUT_SECONDS,
+    ROOM_DELETE_MAX_ATTEMPTS,
+    ROOM_DELETE_RETRY_BACKOFF_SECONDS,
+)
 from src.interview.end_state import EndCause
 
 logger = logging.getLogger(__name__)
@@ -37,6 +41,7 @@ class EndSequence:
         delete_room_fn: Callable[[], Awaitable[None]] | None = None,  # 룸 삭제 1회 시도
         step_timeout_seconds: float = END_STEP_TIMEOUT_SECONDS,
         room_delete_max_attempts: int = ROOM_DELETE_MAX_ATTEMPTS,
+        room_delete_backoff_seconds: float = ROOM_DELETE_RETRY_BACKOFF_SECONDS,
     ) -> None:
         self._shutdown_fn = shutdown_fn
         self._writer = writer
@@ -46,6 +51,7 @@ class EndSequence:
         self._delete_room_fn = delete_room_fn
         self._step_timeout = step_timeout_seconds
         self._room_delete_attempts = room_delete_max_attempts
+        self._room_delete_backoff = room_delete_backoff_seconds
 
     async def run(self, cause: EndCause) -> None:
         logger.info("종료 시퀀스 시작 — 원인=%s", cause)
@@ -121,6 +127,10 @@ class EndSequence:
                     attempt,
                     self._room_delete_attempts,
                 )
+                if attempt < self._room_delete_attempts:
+                    # 연속 재시도는 같은 일시 장애 창에서 상관돼 전부 실패한다 —
+                    # 간격을 두어 장애 창을 벗어날 기회를 준다 (총 시간은 여전히 유한)
+                    await asyncio.sleep(self._room_delete_backoff)
         logger.error(
             "룸 삭제 소진 — 종료 표식·transcript 행 기반 판별 계약으로 수렴 (PRD §3)"
         )
