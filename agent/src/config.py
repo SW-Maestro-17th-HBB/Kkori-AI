@@ -30,3 +30,9 @@ REDIS_TRANSCRIPT_TTL_SECONDS = 86400  # 마지막 발화 이후 Redis 사본 잔
 INTERVIEW_DURATION_SECONDS = 30 * 60  # THIRTY_MIN 총 면접 시간
 WRAP_UP_REMAINING_SECONDS = 5 * 60  # soft — 남은 시간이 이하로 내려가면 마무리 단계 진입
 HARD_OVERRUN_GRACE_SECONDS = 3 * 60  # hard — 예정 종료 초과 유예, 소진 시 코드 강제 클로징
+
+# 세션 정리·퇴장 — docs/prd/interview-end.md §3
+INTERVIEW_END_TOPIC = "interview:end"  # 사용자 종료 SendData topic [미확정 — Spring 계약 합의]
+END_STEP_TIMEOUT_SECONDS = 10  # 종료 시퀀스 외부 호출(DB·Redis·LiveKit) 단계별 타임아웃
+ROOM_DELETE_MAX_ATTEMPTS = 3  # 룸 삭제 bounded retry — best-effort 단계가 아니다
+ROOM_DELETE_RETRY_BACKOFF_SECONDS = 2  # 재시도 간격 — 연속 재시도는 같은 일시 장애 창에서 전부 실패한다

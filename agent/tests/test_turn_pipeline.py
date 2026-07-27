@@ -773,6 +773,58 @@ def test_first_answer_completed_in_wrap_up_forces_final_question():
     assert env.pipeline.end_state.phase is EndPhase.WAITING_FINAL_ANSWER
 
 
+def test_early_end_before_initial_question_suppresses_it():
+    cleanup = _CleanupSpy()
+    env = _make(cleanup_fn=cleanup)
+
+    async def scenario():
+        # 초기화 중 보류됐던 종료 신호가 초기 발화보다 먼저 클로징을 시작한 경우
+        env.pipeline.begin_closing(EndCause.USER_REQUEST)
+        await env.pipeline.speak_initial("안녕하세요, 자기소개 부탁드립니다.")
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    # 초기 질문은 stale 검사로 폐기되고, 클로징만 발화·커밋된다
+    assert [u.question_type for u in env.log.utterances] == [QuestionType.CLOSING]
+    assert cleanup.causes == [EndCause.USER_REQUEST]
+
+
+def test_marker_recorded_exactly_once_on_closing_entry():
+    markers: list[EndCause] = []
+
+    async def marker(cause):
+        markers.append(cause)
+
+    cleanup = _CleanupSpy()
+    env = _make(cleanup_fn=cleanup, marker_fn=marker)
+
+    async def scenario():
+        await _bootstrap(env)
+        env.pipeline.begin_closing(EndCause.USER_REQUEST)
+        env.pipeline.begin_closing(EndCause.HARD_TIMEOUT)  # 패자 — 부수효과 없음
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    assert markers == [EndCause.USER_REQUEST]
+
+
+def test_marker_failure_does_not_block_closing():
+    async def marker(cause):
+        raise RuntimeError("marker boom")
+
+    cleanup = _CleanupSpy()
+    env = _make(cleanup_fn=cleanup, marker_fn=marker)
+
+    async def scenario():
+        await _bootstrap(env)
+        env.pipeline.begin_closing(EndCause.USER_REQUEST)
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    assert env.log.utterances[-1].question_type is QuestionType.CLOSING  # 클로징 계속
+    assert cleanup.causes == [EndCause.USER_REQUEST]
+
+
 def test_waiting_without_final_question_is_defended():
     cleanup = _CleanupSpy()
     env = _make(cleanup_fn=cleanup)

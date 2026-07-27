@@ -13,6 +13,7 @@ import json
 import logging
 import os
 from contextlib import suppress
+from datetime import datetime, timezone
 
 from redis.asyncio import Redis
 
@@ -97,6 +98,51 @@ class RedisTranscriptWriter:
                 )
             finally:
                 self._queue.task_done()
+
+
+async def write_termination_marker(session_id: str, cause: str) -> bool:
+    """종료 표식 기록 — transcript 행과 독립적인 종료 증거. docs/prd/interview-end.md §3.
+
+    CLOSING 진입 부수효과로 1회 기록되며(클로징 재생 전 — 청취 보장 아님, "종료
+    국면 진입" 증거), flush까지 실패한 최악 경로에서 Spring의 AGENT_LOST 판별
+    재료가 된다. best-effort — 실패해도 종료 국면은 계속되고, 판별 계약은
+    transcript 행 우선순위가 흡수한다. True = 기록 성공.
+    """
+    url = os.getenv(REDIS_URL_ENV)
+    if not url:
+        logger.warning("%s 미설정 — 종료 표식 생략", REDIS_URL_ENV)
+        return False
+    redis: Redis | None = None
+    try:
+        # 클라이언트 생성도 실패 경로다 — 잘못된 URL(ValueError)이 실패 로그를
+        # 우회해 호출자로 전파되지 않게 try 안에서 만든다
+        redis = Redis.from_url(
+            url,
+            socket_timeout=_OP_TIMEOUT_SECONDS,
+            socket_connect_timeout=_OP_TIMEOUT_SECONDS,
+        )
+        payload = json.dumps(
+            {
+                "cause": cause,
+                "markedAt": datetime.now(timezone.utc)
+                .isoformat(timespec="seconds")
+                .replace("+00:00", "Z"),
+            }
+        )
+        # TTL은 transcript 사본과 동일 원칙 — 표식도 세션 데이터라 잔존을 제한한다
+        await redis.set(
+            f"interview:{session_id}:termination",
+            payload,
+            ex=REDIS_TRANSCRIPT_TTL_SECONDS,
+        )
+        return True
+    except Exception as exc:
+        logger.warning("종료 표식 기록 실패(%s) — 종료 국면은 계속", type(exc).__name__)
+        return False
+    finally:
+        if redis is not None:
+            with suppress(Exception):
+                await redis.aclose()
 
 
 def create_transcript_writer(session_id: str | None) -> RedisTranscriptWriter | None:

@@ -68,6 +68,7 @@ class TurnPipeline:
         end_state: EndState | None = None,
         interview_clock: InterviewClock | None = None,
         cleanup_fn: Callable[[EndCause], Awaitable[None]] | None = None,
+        marker_fn: Callable[[EndCause], Awaitable[object]] | None = None,
     ) -> None:
         self._log = log
         self._orchestrator_fn = orchestrator_fn
@@ -80,6 +81,7 @@ class TurnPipeline:
         self._end_state = end_state or EndState()
         self._interview_clock = interview_clock
         self._cleanup_fn = cleanup_fn
+        self._marker_fn = marker_fn  # 종료 표식 기록 — CLOSING 진입 부수효과 (§3)
         self._closing_reason: str | None = None  # END가 Orchestrator 판단일 때만 존재
         self._turn_seq = 0
         self._tasks: set[asyncio.Task] = set()
@@ -170,6 +172,13 @@ class TurnPipeline:
         """
         cause = self._end_state.cause
         logger.info("종료 국면 진입 — 원인=%s", cause)
+        # 종료 표식 — 클로징 재생 전에 기록한다("종료 국면 진입" 증거, best-effort).
+        # 전이 승자만 이 task를 실행하므로 정확히 1회다.
+        if self._marker_fn is not None:
+            try:
+                await self._marker_fn(cause)
+            except Exception as exc:
+                logger.warning("종료 표식 기록 예외(%s) — 계속", type(exc).__name__)
         text = random.choice(closing_statements_for(cause))
         # 진행 중 발화(질문 재생)가 있으면 완료를 기다린 뒤 클로징을 재생한다 —
         # 재생을 자르지 않는다(PRD §1 hard). lock을 기다리던 다른 발화 실행은
