@@ -82,3 +82,11 @@ def test_purge_skipped_without_redis_config(monkeypatch):
 
     monkeypatch.delenv(REDIS_URL_ENV, raising=False)
     assert asyncio.run(purge_transcript_copy("123")) is False
+
+
+def test_purge_returns_false_on_malformed_url(monkeypatch):
+    from src.interview.redis_sink import purge_transcript_copy
+
+    # 클라이언트 생성 실패(ValueError)도 예외 전파가 아니라 실패 반환이다
+    monkeypatch.setenv(REDIS_URL_ENV, "not-a-url")
+    assert asyncio.run(purge_transcript_copy("123")) is False

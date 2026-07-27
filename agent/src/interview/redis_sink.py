@@ -153,20 +153,24 @@ async def purge_transcript_copy(session_id: str) -> bool:
     url = os.getenv(REDIS_URL_ENV)
     if not url:
         return False
-    redis = Redis.from_url(
-        url,
-        socket_timeout=_OP_TIMEOUT_SECONDS,
-        socket_connect_timeout=_OP_TIMEOUT_SECONDS,
-    )
+    redis: Redis | None = None
     try:
+        # 클라이언트 생성도 실패 경로다 — 잘못된 URL(ValueError)이 실패 로그를
+        # 우회해 호출자로 전파되지 않게 try 안에서 만든다
+        redis = Redis.from_url(
+            url,
+            socket_timeout=_OP_TIMEOUT_SECONDS,
+            socket_connect_timeout=_OP_TIMEOUT_SECONDS,
+        )
         await redis.delete(f"interview:{session_id}:transcript")
         return True
     except Exception as exc:
         logger.warning("Redis 사본 정리 실패(%s) — TTL로 만료", type(exc).__name__)
         return False
     finally:
-        with suppress(Exception):
-            await redis.aclose()
+        if redis is not None:
+            with suppress(Exception):
+                await redis.aclose()
 
 
 def create_transcript_writer(session_id: str | None) -> RedisTranscriptWriter | None:
