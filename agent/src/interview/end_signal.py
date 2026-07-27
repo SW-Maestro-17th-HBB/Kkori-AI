@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -40,3 +41,40 @@ def is_end_signal(
         logger.warning("종료 신호 sessionId 불일치 — 무시")
         return False
     return True
+
+
+class EndSignalReceiver:
+    """수신과 처리의 분리 — 초기화 구간의 종료 신호 유실 방지.
+
+    LiveKit data 메시지는 재전달되지 않으므로 리스너는 룸 이벤트가 흐르기 전에
+    등록돼야 한다. 파이프라인이 준비되기 전에 도착한 유효 신호는 보관되고,
+    bind 시점에 즉시 전달된다. 룸 이벤트와 bind는 같은 이벤트 루프에서 동기
+    실행되므로 별도 잠금이 필요 없다.
+    """
+
+    def __init__(self, *, expected_topic: str, session_id: str) -> None:
+        self._expected_topic = expected_topic
+        self._session_id = session_id
+        self._requested = False
+        self._on_end: Callable[[], None] | None = None
+
+    def on_data(self, packet) -> None:
+        """`data_received` 리스너 — 룸 연결 전에 등록해도 무방하다."""
+        if not is_end_signal(
+            participant=packet.participant,
+            topic=packet.topic,
+            data=packet.data,
+            expected_topic=self._expected_topic,
+            session_id=self._session_id,
+        ):
+            return
+        logger.info("사용자 종료 신호 수신")
+        self._requested = True
+        if self._on_end is not None:
+            self._on_end()
+
+    def bind(self, on_end: Callable[[], None]) -> None:
+        """파이프라인 준비 완료 시 호출 — 보류된 신호가 있으면 즉시 전달한다."""
+        self._on_end = on_end
+        if self._requested:
+            on_end()

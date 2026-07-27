@@ -24,7 +24,7 @@ from src.config import (
 )
 from src.interview.conversation_log import ConversationLog
 from src.interview.end_sequence import EndSequence
-from src.interview.end_signal import is_end_signal
+from src.interview.end_signal import EndSignalReceiver
 from src.interview.end_state import EndCause
 from src.interview.initial_question import initial_utterance, select_initial_question
 from src.interview.interview_clock import InterviewClock
@@ -113,6 +113,17 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         ctx.shutdown(reason="missing runtime config: redis")
         return
 
+    # 사용자 명시 종료 수신 — 리스너는 룸 이벤트가 흐르기 전(초기화 전)에 먼저 등록한다.
+    # LiveKit data 메시지는 재전달되지 않으므로, 파이프라인 준비 전에 도착한 신호는
+    # receiver가 보관했다가 bind 시점에 전달된다 (초기화 구간 유실 방지).
+    # sessionId 없는 로컬·콘솔은 외부 종료 신호 대상이 아니다.
+    end_receiver = None
+    if session_id:
+        end_receiver = EndSignalReceiver(
+            expected_topic=INTERVIEW_END_TOPIC, session_id=session_id
+        )
+        ctx.room.on("data_received", end_receiver.on_data)
+
     # 룸 연결과 candidate 입장 확인을 가장 먼저 한다(wait_for_participant가 미연결 시 자동 연결) —
     # 참가자가 끝내 입장하지 않으면 유료 선택 호출도 발생하지 않고, LLM 지연이 룸 연결을 막지 않는다.
     # 콘솔 모드는 fake room이라 대기 없이 진행.
@@ -192,23 +203,6 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         marker_fn=on_marker if session_id else None,
     )
 
-    # 사용자 명시 종료 — Spring의 서버 API SendData 수신 (PRD §3 수신 검증 3조건).
-    # sessionId 없는 로컬·콘솔은 외부 종료 신호 대상이 아니다.
-    if session_id:
-
-        def on_data_received(packet) -> None:
-            if is_end_signal(
-                participant=packet.participant,
-                topic=packet.topic,
-                data=packet.data,
-                expected_topic=INTERVIEW_END_TOPIC,
-                session_id=session_id,
-            ):
-                logger.info("사용자 종료 신호 수신 — 클로징 시작")
-                pipeline.begin_closing(EndCause.USER_REQUEST)
-
-        ctx.room.on("data_received", on_data_received)
-
     async def cleanup() -> None:
         # entrypoint는 초기 발화 후 반환해도 세션은 계속 동작한다 —
         # 정리는 실제 job shutdown 시점에만 수행한다(aclose는 멱등)
@@ -223,6 +217,11 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     ctx.add_shutdown_callback(cleanup)
 
     await session.start(room=ctx.room, agent=InterviewerAgent(pipeline))
+
+    # 파이프라인·세션 준비 완료 — 초기화 중 보류된 종료 신호가 있으면 여기서
+    # 클로징으로 이어지고, 아래 초기 발화는 stale 검사로 폐기된다
+    if end_receiver is not None:
+        end_receiver.bind(lambda: pipeline.begin_closing(EndCause.USER_REQUEST))
 
     await pipeline.speak_initial(initial_utterance(question))
     pipeline.start_time_guard()
