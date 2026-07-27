@@ -35,3 +35,6 @@ HARD_OVERRUN_GRACE_SECONDS = 3 * 60  # hard — 예정 종료 초과 유예, 소
 INTERVIEW_END_TOPIC = "interview:end"  # 사용자 종료 SendData topic [미확정 — Spring 계약 합의]
 END_STEP_TIMEOUT_SECONDS = 10  # 종료 시퀀스 외부 호출(DB·Redis·LiveKit) 단계별 타임아웃
 ROOM_DELETE_MAX_ATTEMPTS = 3  # 룸 삭제 bounded retry — best-effort 단계가 아니다
+
+# 리포트 생성 요청 발행 — docs/prd/interview-end.md §5
+REPORT_REQUEST_STREAM_KEY = "interview:report:requests"  # [미확정 — worker 스토리와 합의]
