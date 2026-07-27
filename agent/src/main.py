@@ -4,12 +4,13 @@ import os
 from datetime import datetime, timezone
 
 from dotenv import load_dotenv
-from livekit import agents
+from livekit import agents, api
 from livekit.agents import Agent, AgentServer, AgentSession, TurnHandlingOptions, inference
 
 from src.config import (
     HARD_OVERRUN_GRACE_SECONDS,
     INTERVIEW_DURATION_SECONDS,
+    INTERVIEW_END_TOPIC,
     INTERVIEW_LLM_MODEL,
     LLM_MODEL,
     ORCHESTRATOR_LLM_MODEL,
@@ -22,13 +23,19 @@ from src.config import (
     WRAP_UP_REMAINING_SECONDS,
 )
 from src.interview.conversation_log import ConversationLog
+from src.interview.end_sequence import EndSequence
+from src.interview.end_signal import is_end_signal
 from src.interview.end_state import EndCause
 from src.interview.initial_question import initial_utterance, select_initial_question
 from src.interview.interview_clock import InterviewClock
 from src.interview.orchestrator import decide
 from src.interview.prompts import INTERVIEWER_INSTRUCTIONS
 from src.interview.question_generation import generate_question
-from src.interview.redis_sink import create_transcript_writer
+from src.interview.redis_sink import (
+    REDIS_URL_ENV,
+    create_transcript_writer,
+    write_termination_marker,
+)
 from src.interview.turn_pipeline import SpeechResult, TurnPipeline
 from src.log_privacy import install_privacy_filter
 from src.session_context import parse_job_metadata
@@ -98,6 +105,14 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         position = os.getenv("KKORI_POSITION_FIXTURE")
         resume_context = os.getenv("KKORI_RESUME_CONTEXT_FIXTURE")
 
+    # 운영 fail-fast — sessionId 있는 잡의 저장 인프라 미구성은 시작 거부한다.
+    # 면접을 끝까지 진행해놓고 저장을 통째로 잃는 것보다 배포 시점에 드러나는 게 낫다.
+    # 생략 폴백(경고 후 진행)은 sessionId 부재(콘솔·픽스처 로컬)에만 허용 (PRD §3)
+    if session_id and not os.getenv(REDIS_URL_ENV):
+        logger.error("sessionId 있는 잡에 %s 미구성 — 시작 거부(fail-fast)", REDIS_URL_ENV)
+        ctx.shutdown(reason="missing runtime config: redis")
+        return
+
     # 룸 연결과 candidate 입장 확인을 가장 먼저 한다(wait_for_participant가 미연결 시 자동 연결) —
     # 참가자가 끝내 입장하지 않으면 유료 선택 호출도 발생하지 않고, LLM 지연이 룸 연결을 막지 않는다.
     # 콘솔 모드는 fake room이라 대기 없이 진행.
@@ -142,14 +157,28 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         turn_handling=TurnHandlingOptions(turn_detection=inference.TurnDetector()),
     )
 
-    async def on_cleanup(cause: EndCause) -> None:
-        # 종료 시퀀스(HBB1-286 — flush·리포트 발행·룸 정리) 구현 전까지의 임시 동작 —
-        # 클로징 재생 후 잡을 종료한다
-        ctx.shutdown(reason=f"interview end: {cause}")
+    writer = create_transcript_writer(session_id)
+
+    async def delete_room() -> None:
+        await ctx.api.room.delete_room(api.DeleteRoomRequest(room=ctx.room.name))
+
+    # 종료 시퀀스 — flush(HBB1-287)·리포트 발행(HBB1-288)은 주입점만 정의된 상태.
+    # 룸 삭제는 운영 경로(sessionId 존재·실제 룸)에서만 수행한다.
+    end_sequence = EndSequence(
+        shutdown_fn=lambda reason: ctx.shutdown(reason=reason),
+        writer=writer,
+        delete_room_fn=(
+            delete_room if session_id and not ctx.is_fake_job() else None
+        ),
+    )
+
+    async def on_marker(cause: EndCause) -> None:
+        if session_id:
+            await write_termination_marker(session_id, str(cause))
 
     pipeline = TurnPipeline(
         log=ConversationLog(),
-        writer=create_transcript_writer(session_id),
+        writer=writer,
         orchestrator_fn=lambda log, wrap_up_minutes: decide(
             orchestrator_llm, log, wrap_up_remaining_minutes=wrap_up_minutes
         ),
@@ -159,8 +188,26 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         say_fn=_make_say_fn(session),
         shutdown_fn=lambda reason: ctx.shutdown(reason=reason),
         interview_clock=interview_clock,
-        cleanup_fn=on_cleanup,
+        cleanup_fn=end_sequence.run,
+        marker_fn=on_marker if session_id else None,
     )
+
+    # 사용자 명시 종료 — Spring의 서버 API SendData 수신 (PRD §3 수신 검증 3조건).
+    # sessionId 없는 로컬·콘솔은 외부 종료 신호 대상이 아니다.
+    if session_id:
+
+        def on_data_received(packet) -> None:
+            if is_end_signal(
+                participant=packet.participant,
+                topic=packet.topic,
+                data=packet.data,
+                expected_topic=INTERVIEW_END_TOPIC,
+                session_id=session_id,
+            ):
+                logger.info("사용자 종료 신호 수신 — 클로징 시작")
+                pipeline.begin_closing(EndCause.USER_REQUEST)
+
+        ctx.room.on("data_received", on_data_received)
 
     async def cleanup() -> None:
         # entrypoint는 초기 발화 후 반환해도 세션은 계속 동작한다 —
