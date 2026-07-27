@@ -14,6 +14,8 @@ from src.interview.conversation_log import (
     QuestionType,
     Speaker,
 )
+from src.interview.end_state import EndCause, EndPhase
+from src.interview.interview_clock import InterviewClock
 from src.interview.orchestrator import Decision, DecisionSource
 from src.interview.prompts import FALLBACK_QUESTIONS
 from src.interview.question_generation import GeneratedQuestion
@@ -382,3 +384,122 @@ def test_aclose_is_idempotent_and_blocks_new_turns():
     asyncio.run(scenario())
     assert env.writer.closed
     assert env.log.utterances[-1].speaker is Speaker.INTERVIEWER  # 종료 후 답변 미적재
+
+
+# --- 종료 국면 (docs/prd/interview-end.md §1) ---
+
+class _ClosingSpy:
+    def __init__(self):
+        self.causes: list[EndCause] = []
+
+    async def __call__(self, cause):
+        self.causes.append(cause)
+
+
+def test_waiting_final_answer_commits_exactly_once_then_closes():
+    closing = _ClosingSpy()
+    env = _make(closing_fn=closing)
+
+    async def scenario():
+        await _bootstrap(env)
+        env.pipeline.end_state.try_advance(EndPhase.WAITING_FINAL_ANSWER)
+        env.pipeline.on_user_turn_completed("마지막으로 한마디 드리겠습니다.")
+        await _drain(env.pipeline)
+        env.pipeline.on_user_turn_completed("클로징 이후 추가 발화입니다.")
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    final_answer = env.log.utterances[-1]
+    assert final_answer.speaker is Speaker.CANDIDATE  # 마지막 답변 1회만 커밋
+    assert final_answer.content == "마지막으로 한마디 드리겠습니다."
+    assert closing.causes == [EndCause.FINAL_QUESTION]
+    assert env.pipeline.end_state.phase is EndPhase.CLOSING
+
+
+def test_direct_closing_path_does_not_commit_later_turns():
+    closing = _ClosingSpy()
+    env = _make(closing_fn=closing)
+
+    async def scenario():
+        await _bootstrap(env)
+        assert env.pipeline.begin_closing(EndCause.USER_REQUEST) is True
+        env.pipeline.on_user_turn_completed("종료 요청 이후 발화입니다.")
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    assert env.log.utterances[-1].speaker is Speaker.INTERVIEWER  # 전이 이후 turn 미커밋
+    assert closing.causes == [EndCause.USER_REQUEST]
+
+
+def test_hard_promotion_beats_final_answer_and_transcript_matches_winner():
+    closing = _ClosingSpy()
+    env = _make(closing_fn=closing)
+
+    async def scenario():
+        await _bootstrap(env)
+        env.pipeline.end_state.try_advance(EndPhase.WAITING_FINAL_ANSWER)
+        # hard가 마지막 답변 대기를 CLOSING으로 승격 — 이후 도착한 답변은 폐기
+        assert env.pipeline.begin_closing(EndCause.HARD_TIMEOUT) is True
+        env.pipeline.on_user_turn_completed("뒤늦게 도착한 마지막 답변입니다.")
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    assert env.log.utterances[-1].speaker is Speaker.INTERVIEWER  # 승자와 일치 — 답변 없음
+    assert closing.causes == [EndCause.HARD_TIMEOUT]
+    assert env.pipeline.end_state.cause is EndCause.HARD_TIMEOUT
+
+
+def test_begin_closing_is_first_wins_with_single_closing_run():
+    closing = _ClosingSpy()
+    env = _make(closing_fn=closing)
+
+    async def scenario():
+        await _bootstrap(env)
+        assert env.pipeline.begin_closing(EndCause.USER_REQUEST) is True
+        assert env.pipeline.begin_closing(EndCause.HARD_TIMEOUT) is False
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    assert closing.causes == [EndCause.USER_REQUEST]  # 부수효과 정확히 1회
+
+
+def test_leaving_running_discards_inflight_generation():
+    gate = asyncio.Event()
+    closing = _ClosingSpy()
+    env = _make(orch=_OrchSpy(gate=gate), closing_fn=closing)
+
+    async def scenario():
+        await _bootstrap(env)
+        env.pipeline.on_user_turn_completed("본론 답변입니다.")
+        await asyncio.sleep(0)  # 파이프라인이 게이트에서 블록될 때까지 양보
+        env.pipeline.begin_closing(EndCause.USER_REQUEST)
+        gate.set()
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    # 답변은 RUNNING에서 이미 커밋됐고, 진행 중이던 질문 생성 결과는 폐기됐다
+    assert env.log.utterances[-1].speaker is Speaker.CANDIDATE
+    assert closing.causes == [EndCause.USER_REQUEST]
+
+
+def test_time_guard_forces_hard_closing_when_deadline_passed():
+    closing = _ClosingSpy()
+    now = {"t": 0.0}
+    clock = InterviewClock(
+        duration_seconds=1800,
+        wrap_up_remaining_seconds=300,
+        hard_grace_seconds=180,
+        monotonic=lambda: now["t"],
+    )
+    clock.start()
+    env = _make(closing_fn=closing, interview_clock=clock)
+
+    async def scenario():
+        await _bootstrap(env)
+        now["t"] = 2000.0  # 예정 종료(1800) + 유예(180) 초과
+        env.pipeline.start_time_guard()
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    assert closing.causes == [EndCause.HARD_TIMEOUT]
+    assert env.pipeline.end_state.phase is EndPhase.CLOSING

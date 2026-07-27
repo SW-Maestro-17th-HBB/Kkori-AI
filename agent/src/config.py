@@ -25,3 +25,8 @@ UTTERANCE_INJECTION_TOKEN_CAP = 800  # 개별 발화 주입 상한 — 로그 �
 QUESTION_MAX_CHARS = 250  # Interview 출력 길이 상한 — 초과 시 폴백 질문
 LLM_CALL_TIMEOUT_SECONDS = 20  # 판단·생성 호출 상한 — 초과 시 각 폴백 경로(침묵 고정 방지)
 REDIS_TRANSCRIPT_TTL_SECONDS = 86400  # 마지막 발화 이후 Redis 사본 잔존 상한(매 append 갱신)
+
+# 면접 종료 — docs/prd/interview-end.md §1. soft 5분·hard 3분은 기본값 확정(실측 조정 여지)
+INTERVIEW_DURATION_SECONDS = 30 * 60  # THIRTY_MIN 총 면접 시간
+WRAP_UP_REMAINING_SECONDS = 5 * 60  # soft — 남은 시간이 이하로 내려가면 마무리 단계 진입
+HARD_OVERRUN_GRACE_SECONDS = 3 * 60  # hard — 예정 종료 초과 유예, 소진 시 코드 강제 클로징
