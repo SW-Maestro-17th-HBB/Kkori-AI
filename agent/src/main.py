@@ -142,22 +142,24 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         turn_handling=TurnHandlingOptions(turn_detection=inference.TurnDetector()),
     )
 
-    async def on_closing(cause: EndCause) -> None:
-        # 클로징 발화(HBB1-285)·종료 시퀀스(HBB1-286) 구현 전까지의 임시 동작 —
-        # 종료 국면에 들어간 세션을 침묵으로 방치하지 않고 잡을 종료한다
+    async def on_cleanup(cause: EndCause) -> None:
+        # 종료 시퀀스(HBB1-286 — flush·리포트 발행·룸 정리) 구현 전까지의 임시 동작 —
+        # 클로징 재생 후 잡을 종료한다
         ctx.shutdown(reason=f"interview end: {cause}")
 
     pipeline = TurnPipeline(
         log=ConversationLog(),
         writer=create_transcript_writer(session_id),
-        orchestrator_fn=lambda log: decide(orchestrator_llm, log),
+        orchestrator_fn=lambda log, wrap_up_minutes: decide(
+            orchestrator_llm, log, wrap_up_remaining_minutes=wrap_up_minutes
+        ),
         generate_fn=lambda decision, log: generate_question(
             interview_llm, decision, log, resume_context=resume_context
         ),
         say_fn=_make_say_fn(session),
         shutdown_fn=lambda reason: ctx.shutdown(reason=reason),
         interview_clock=interview_clock,
-        closing_fn=on_closing,
+        cleanup_fn=on_cleanup,
     )
 
     async def cleanup() -> None:

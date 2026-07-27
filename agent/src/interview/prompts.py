@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from src.interview.conversation_log import FollowUpType
+from src.interview.end_state import EndCause
 
 # 시스템 프롬프트는 역할·지시만 담는다. 지원 직무·이력서 요약은 초기 질문 지시에서 별도 주입.
 INTERVIEWER_INSTRUCTIONS = (
@@ -140,26 +141,90 @@ FALLBACK_QUESTIONS = (
     "최근 진행한 작업에서 아쉬웠던 점이 있다면 무엇인가요?",
 )
 
+# ---------------------------------------------------------------------------
+# 마무리 국면 (docs/prd/interview-end.md §2) — 검수 고정 문구, LLM 생성 없음
+# ---------------------------------------------------------------------------
 
-def orchestrator_instructions(conversation_text: str) -> str:
-    """답변 평가·액션 판단 지시 — 출력 형식은 response_format 스키마가 강제한다."""
+# 마지막 질문 — "하고 싶은 말씀" 계열만. 역질문 유도형("궁금한 점 있으신가요")은
+# 금지한다: candidate의 질문에 agent가 답변할 능력이 없는 상황을 만들지 않는다.
+FINAL_QUESTIONS = (
+    "마지막으로 하고 싶은 말씀이나 강조하고 싶은 부분이 있다면 편하게 말씀해 주세요.",
+    "면접을 마치기 전에, 오늘 미처 보여드리지 못한 강점이 있다면 마지막으로 말씀해 주세요.",
+)
+
+# 클로징 문구 — 종료 사유별 세트. 평가·리포트 내용은 언급하지 않는다.
+CLOSING_STATEMENTS_GENERAL = (
+    "오늘 면접은 여기까지입니다. 성실하게 답변해 주셔서 감사합니다. 수고 많으셨습니다.",
+    "오늘 준비한 면접은 여기까지입니다. 답변 잘 들었습니다. 수고 많으셨습니다.",
+)
+CLOSING_STATEMENTS_TIME_UP = (
+    "예정된 시간이 다 되어서 면접은 여기까지 진행하겠습니다. 수고 많으셨습니다.",
+    "시간이 다 되어 오늘 면접은 여기서 마치겠습니다. 답변해 주셔서 감사합니다.",
+)
+
+
+def closing_statements_for(cause: EndCause) -> tuple[str, ...]:
+    """종료 원인 → 클로징 문구 세트 — 일반형(FINAL_QUESTION·USER_REQUEST) /
+    시간 소진형(LLM_END·HARD_TIMEOUT). docs/prd/interview-end.md §2."""
+    if cause in (EndCause.LLM_END, EndCause.HARD_TIMEOUT):
+        return CLOSING_STATEMENTS_TIME_UP
+    return CLOSING_STATEMENTS_GENERAL
+
+
+def orchestrator_instructions(
+    conversation_text: str, *, wrap_up_remaining_minutes: int | None = None
+) -> str:
+    """답변 평가·액션 판단 지시 — 출력 형식은 response_format 스키마가 강제한다.
+
+    wrap_up_remaining_minutes가 주어지면 마무리 단계 변형이다(docs/prd/interview-end.md
+    §2): 남은 시간이 판단 재료로 주입되고, 판단 규칙이 {FOLLOW_UP, FINAL_QUESTION,
+    END}로 바뀐다 — 마무리 단계에 새 주제(NEXT_TOPIC)는 없다.
+    """
     type_lines = "\n".join(
         f"- {follow_up_type}: {direction}"
         for follow_up_type, direction in _FOLLOW_UP_DIRECTIONS.items()
     )
-    return "\n\n".join(
-        [
-            "당신은 AI 기술 면접의 진행 판단자입니다. 아래 면접 대화에서 지원자의 "
-            "마지막 답변을 평가하고 다음 액션을 결정하세요.",
-            "평가 기준(다음 액션 결정에 필요한 만큼만 보고, 점수화하지 않습니다): "
-            "구체성(실제 경험·행동·수치가 있는가), 깊이(이유·원리를 설명하는가), "
-            "완결성(질문에 실제로 답했는가), 소진도(이 주제에서 더 파낼 것이 있는가).",
+    parts = [
+        "당신은 AI 기술 면접의 진행 판단자입니다. 아래 면접 대화에서 지원자의 "
+        "마지막 답변을 평가하고 다음 액션을 결정하세요.",
+    ]
+    if wrap_up_remaining_minutes is not None:
+        remaining = (
+            "남은 면접 시간이 1분도 채 남지 않았습니다."
+            if wrap_up_remaining_minutes <= 0
+            else f"남은 면접 시간은 약 {wrap_up_remaining_minutes}분입니다."
+        )
+        parts.append(f"지금은 면접 마무리 단계입니다. {remaining}")
+    parts.append(
+        "평가 기준(다음 액션 결정에 필요한 만큼만 보고, 점수화하지 않습니다): "
+        "구체성(실제 경험·행동·수치가 있는가), 깊이(이유·원리를 설명하는가), "
+        "완결성(질문에 실제로 답했는가), 소진도(이 주제에서 더 파낼 것이 있는가)."
+    )
+    if wrap_up_remaining_minutes is None:
+        parts.append(
             "판단 규칙:\n"
             "- reason에 판단 근거를 한 문장으로, 액션을 정하기 전에 먼저 서술하세요.\n"
             "- 파고들 가치가 있으면(구체적 경험 언급, 불완전한 설명, 검증할 주장) "
             "action=FOLLOW_UP과 followUpType을 고르세요.\n"
             "- 주제가 소진됐으면(충분히 깊은 답변, 더 파낼 것이 없음) action=NEXT_TOPIC.\n"
-            "- 지원자가 모른다고 하거나 포기한 답변은 파고들지 말고 NEXT_TOPIC을 고르세요.",
+            "- 지원자가 모른다고 하거나 포기한 답변은 파고들지 말고 NEXT_TOPIC을 고르세요."
+        )
+    else:
+        parts.append(
+            "판단 규칙(마무리 단계):\n"
+            "- reason에 판단 근거를 한 문장으로, 액션을 정하기 전에 먼저 서술하세요.\n"
+            "- 직전 답변에 파고들 가치가 남았고 시간 여유가 있으면 action=FOLLOW_UP과 "
+            "followUpType을 고르세요.\n"
+            "- 주제가 소진됐고 지원자의 마지막 한마디를 들을 시간이 남았으면 "
+            "action=FINAL_QUESTION을 고르세요. 마지막 질문의 문구는 시스템이 정합니다.\n"
+            "- 시간이 사실상 소진됐으면 action=END를 고르세요. 마무리 인사는 시스템이 "
+            "처리합니다.\n"
+            "- 마무리 단계에서는 새 주제를 시작하지 않습니다.\n"
+            "- 지원자가 모른다고 하거나 포기한 답변은 파고들지 말고 FINAL_QUESTION이나 "
+            "END를 고르세요."
+        )
+    parts.extend(
+        [
             f"꼬리질문 유형:\n{type_lines}",
             "CONSISTENCY는 마지막 답변이 이전 주제의 답변과 명백히 상충할 때만 고르세요. "
             "애매하면 고르지 않습니다. 고를 때는 상충한 질문의 번호를 refQuestionNumber에 "
@@ -170,6 +235,7 @@ def orchestrator_instructions(conversation_text: str) -> str:
             f"[A번호]로 표기됩니다.\n{conversation_text}",
         ]
     )
+    return "\n\n".join(parts)
 
 
 def follow_up_instructions(
