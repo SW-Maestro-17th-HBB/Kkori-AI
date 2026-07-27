@@ -20,13 +20,18 @@ class QuestionType(StrEnum):
     INITIAL = "initial"
     TOPIC = "topic"
     FOLLOW_UP = "followup"
+    FINAL = "final"  # 마무리 국면의 마지막 질문 — docs/prd/interview-end.md §2
+    CLOSING = "closing"  # 클로징 인사 — 질문이 아니므로 번호 없음
 
 
 class Action(StrEnum):
-    """Orchestrator 액션 — docs/prd/follow-up-question.md §2."""
+    """Orchestrator 액션 — docs/prd/follow-up-question.md §2.
+    FINAL_QUESTION·END는 마무리 단계에만 허용된다 — docs/prd/interview-end.md §2."""
 
     FOLLOW_UP = "FOLLOW_UP"
     NEXT_TOPIC = "NEXT_TOPIC"
+    FINAL_QUESTION = "FINAL_QUESTION"
+    END = "END"
 
 
 class FollowUpType(StrEnum):
@@ -41,10 +46,14 @@ class FollowUpType(StrEnum):
 
 @dataclass(frozen=True)
 class Utterance:
-    """transcript 발화 객체. 해당 없는 필드는 None(직렬화 시 생략 — null 금지)."""
+    """transcript 발화 객체. 해당 없는 필드는 None(직렬화 시 생략 — null 금지).
 
-    question_number: int
-    parent_question_number: int
+    질문 번호는 closing에만 없다 — "질문이면 번호 있음(final 포함), 인사면 없음"
+    (docs/prd/interview-end.md §2).
+    """
+
+    question_number: int | None
+    parent_question_number: int | None
     speaker: Speaker
     content: str
     spoken_at: datetime
@@ -59,6 +68,18 @@ class Utterance:
         if self.spoken_at.utcoffset() != timedelta(0):
             # naive는 utcoffset()이 None이라 함께 거부된다 — spokenAt 직렬화("Z")의 전제
             raise ValueError("spoken_at은 UTC(offset 0)인 timezone-aware여야 한다")
+
+        if self.question_type is QuestionType.CLOSING:
+            if self.speaker is not Speaker.INTERVIEWER:
+                raise ValueError("closing은 INTERVIEWER 발화여야 한다")
+            if self.question_number is not None or self.parent_question_number is not None:
+                raise ValueError("closing은 질문 번호를 갖지 않는다 (줄기 체계 밖)")
+            if self.follow_up_type is not None or self.ref_question_number is not None:
+                raise ValueError("closing은 질문 메타데이터를 가질 수 없다")
+            return
+
+        if self.question_number is None or self.parent_question_number is None:
+            raise ValueError("closing 외 발화는 질문 번호가 필요하다")
         if self.question_number < 1:
             raise ValueError("question_number는 1 이상이어야 한다")
 
@@ -96,11 +117,12 @@ class Utterance:
 
     def to_json_dict(self) -> dict:
         """camelCase 직렬화 — 해당 없는 필드는 키 자체를 생략한다."""
-        data: dict = {
-            "questionNumber": self.question_number,
-            "parentQuestionNumber": self.parent_question_number,
-            "speaker": str(self.speaker),
-        }
+        data: dict = {}
+        if self.question_number is not None:
+            data["questionNumber"] = self.question_number
+        if self.parent_question_number is not None:
+            data["parentQuestionNumber"] = self.parent_question_number
+        data["speaker"] = str(self.speaker)
         if self.question_type is not None:
             data["questionType"] = str(self.question_type)
         if self.follow_up_type is not None:
@@ -164,6 +186,25 @@ class ConversationLog:
         self._utterances.append(utterance)
         return utterance
 
+    def append_closing(
+        self, content: str, spoken_at: datetime, *, reason: str | None = None
+    ) -> Utterance:
+        """클로징 인사 적재 — 질문 번호 없는 INTERVIEWER 발화 (docs/prd/interview-end.md §2).
+
+        reason은 END가 Orchestrator 판단일 때만 존재한다(기존 reason 규칙과 일관).
+        """
+        utterance = Utterance(
+            question_number=None,
+            parent_question_number=None,
+            speaker=Speaker.INTERVIEWER,
+            content=content,
+            spoken_at=spoken_at,
+            question_type=QuestionType.CLOSING,
+            reason=reason,
+        )
+        self._utterances.append(utterance)
+        return utterance
+
     def append_answer(self, content: str, spoken_at: datetime) -> Utterance:
         """현재 질문 번호·parent를 승계해 답변을 적재한다. 한 질문에 여러 답변 허용."""
         last_question = self._last_question()
@@ -200,11 +241,12 @@ class ConversationLog:
         return self.branch(root) if root is not None else ()
 
     def branch_roots(self) -> tuple[int, ...]:
-        """등장 순서대로의 줄기 루트 번호 목록."""
+        """등장 순서대로의 줄기 루트 번호 목록 (closing은 줄기 체계 밖 — 제외)."""
         roots: list[int] = []
         for u in self._utterances:
-            if u.parent_question_number not in roots:
-                roots.append(u.parent_question_number)
+            root = u.parent_question_number
+            if root is not None and root not in roots:
+                roots.append(root)
         return tuple(roots)
 
     def previous_branches(self) -> tuple[tuple[Utterance, ...], ...]:
@@ -238,9 +280,11 @@ class ConversationLog:
         return None
 
     def all_question_contents(self) -> tuple[str, ...]:
-        """지금까지의 질문 원문 목록 — 주제 전환의 중복 방지 재료."""
+        """지금까지의 질문 원문 목록 — 주제 전환의 중복 방지 재료 (closing 제외)."""
         return tuple(
-            u.content for u in self._utterances if u.speaker is Speaker.INTERVIEWER
+            u.content
+            for u in self._utterances
+            if u.speaker is Speaker.INTERVIEWER and u.question_number is not None
         )
 
     def has_topic_or_followup_question(self) -> bool:
@@ -252,6 +296,6 @@ class ConversationLog:
 
     def _last_question(self) -> Utterance | None:
         for u in reversed(self._utterances):
-            if u.speaker is Speaker.INTERVIEWER:
-                return u
+            if u.speaker is Speaker.INTERVIEWER and u.question_number is not None:
+                return u  # closing(번호 없음)은 질문이 아니다
         return None
