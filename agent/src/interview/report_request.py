@@ -39,12 +39,15 @@ async def publish_report_request(session_id: str) -> bool:
         .replace("+00:00", "Z"),
     }
     for attempt in range(1, _PUBLISH_ATTEMPTS + 1):
-        redis = Redis.from_url(
-            url,
-            socket_timeout=_OP_TIMEOUT_SECONDS,
-            socket_connect_timeout=_OP_TIMEOUT_SECONDS,
-        )
+        redis: Redis | None = None
         try:
+            # 클라이언트 생성도 실패 경로다 — 잘못된 URL(ValueError)이 재시도와
+            # sessionId 식별 로그를 우회해 전파되지 않게 try 안에서 만든다
+            redis = Redis.from_url(
+                url,
+                socket_timeout=_OP_TIMEOUT_SECONDS,
+                socket_connect_timeout=_OP_TIMEOUT_SECONDS,
+            )
             await redis.xadd(REPORT_REQUEST_STREAM_KEY, fields)
             logger.info("리포트 생성 요청 발행 완료 — sessionId=%s", session_id)
             return True
@@ -56,8 +59,9 @@ async def publish_report_request(session_id: str) -> bool:
                 _PUBLISH_ATTEMPTS,
             )
         finally:
-            with suppress(Exception):
-                await redis.aclose()
+            if redis is not None:
+                with suppress(Exception):
+                    await redis.aclose()
     # 식별 가능한 오류 로그 — 미발행 세션의 수동·배치 복구 재료 (PRD §5)
     logger.error(
         "리포트 요청 발행 소진 — sessionId=%s (검출식: transcript 행 존재 & 리포트 없음)",

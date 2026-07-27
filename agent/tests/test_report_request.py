@@ -72,3 +72,34 @@ def test_duplicate_publish_appends_again_consumer_dedupes(monkeypatch):
 def test_publish_skipped_without_redis_config(monkeypatch):
     monkeypatch.delenv(REDIS_URL_ENV, raising=False)
     assert asyncio.run(publish_report_request("123")) is False
+
+
+def test_malformed_url_returns_false_instead_of_raising(monkeypatch):
+    # 클라이언트 생성 실패(ValueError)도 재시도·식별 로그 경로를 타고 False로 끝난다
+    monkeypatch.setenv(REDIS_URL_ENV, "not-a-url")
+    assert asyncio.run(publish_report_request("123")) is False
+
+
+def test_first_failure_then_retry_succeeds(monkeypatch):
+    import src.interview.report_request as report_request
+
+    monkeypatch.setenv(REDIS_URL_ENV, "redis://irrelevant:6379")
+    attempts = {"n": 0}
+
+    class _FlakyRedis:
+        async def xadd(self, key, fields):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise RuntimeError("transient")
+
+        async def aclose(self):
+            pass
+
+    class _Factory:
+        @staticmethod
+        def from_url(url, **kwargs):
+            return _FlakyRedis()
+
+    monkeypatch.setattr(report_request, "Redis", _Factory)
+    assert asyncio.run(publish_report_request("123")) is True
+    assert attempts["n"] == 2  # 1차 실패 → 재시도 성공
