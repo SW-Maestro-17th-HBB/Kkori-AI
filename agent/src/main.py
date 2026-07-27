@@ -155,7 +155,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             interview_llm, decision, log, resume_context=resume_context
         ),
         say_fn=_make_say_fn(session),
-        shutdown_fn=lambda: ctx.shutdown(reason="tts playout failure"),
+        shutdown_fn=lambda reason: ctx.shutdown(reason=reason),
         interview_clock=interview_clock,
         closing_fn=on_closing,
     )

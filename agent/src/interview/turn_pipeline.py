@@ -52,7 +52,7 @@ class TurnPipeline:
         orchestrator_fn: Callable[[ConversationLog], Awaitable[Decision]],
         generate_fn: Callable[[Decision, ConversationLog], Awaitable[GeneratedQuestion]],
         say_fn: Callable[[str], Awaitable[SpeechResult]],
-        shutdown_fn: Callable[[], None],
+        shutdown_fn: Callable[[str], None],
         writer=None,
         max_followups_per_branch: int = MAX_FOLLOWUPS_PER_BRANCH,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
@@ -160,7 +160,7 @@ class TurnPipeline:
         except Exception as exc:
             # 클로징 실패로 세션이 침묵에 머물지 않게 한다 — 최후 fallback은 잡 종료
             logger.error("클로징 처리 예외(%s) — 잡 종료 fallback", type(exc).__name__)
-            self._shutdown_fn()
+            self._shutdown_fn("closing failure")
 
     # --- 초기 발화 (같은 재생·커밋 경로 — 발화 객체 #1) ---
 
@@ -250,7 +250,7 @@ class TurnPipeline:
                 result = await self._try_say(text)
                 if not result.ok:
                     logger.error("TTS 재시도 소진 — 세션 진행 불가, 잡을 종료한다")
-                    self._shutdown_fn()
+                    self._shutdown_fn("tts playout failure")
                     return
 
         async with self._commit_lock:

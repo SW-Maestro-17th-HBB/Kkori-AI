@@ -102,7 +102,7 @@ def _make(**kwargs):
         orchestrator_fn=env.orch,
         generate_fn=env.gen,
         say_fn=env.say,
-        shutdown_fn=lambda: env.shutdowns.append(True),
+        shutdown_fn=lambda reason: env.shutdowns.append(reason),
         writer=env.writer,
         clock=lambda: NOW,
         **kwargs,
@@ -266,7 +266,7 @@ def test_tts_exhaustion_shuts_down_without_commit():
         await _drain(env.pipeline)
 
     asyncio.run(scenario())
-    assert env.shutdowns == [True]
+    assert env.shutdowns == ["tts playout failure"]
     assert env.log.last_question_number() == 2  # 미커밋 — 번호 미소모
     assert env.log.utterances[-1].speaker is Speaker.CANDIDATE
 
@@ -304,7 +304,7 @@ def test_say_exception_twice_shuts_down_without_commit():
         await _drain(env.pipeline)
 
     asyncio.run(scenario())
-    assert env.shutdowns == [True]  # 예외가 잡 종료 경로를 우회하지 않는다
+    assert env.shutdowns == ["tts playout failure"]  # 예외가 잡 종료 경로를 우회하지 않는다
     assert env.log.last_question_number() == 2  # 미커밋·번호 미소모
 
 
@@ -529,7 +529,8 @@ def test_closing_exception_falls_back_to_shutdown():
         await _drain(env.pipeline)
 
     asyncio.run(scenario())
-    assert env.shutdowns == [True]  # 침묵 방치 금지 — 최후 fallback은 잡 종료
+    # 침묵 방치 금지 — 최후 fallback은 잡 종료, reason이 TTS 장애로 오기록되지 않는다
+    assert env.shutdowns == ["closing failure"]
 
 
 def test_time_guard_forces_hard_closing_when_deadline_passed():
