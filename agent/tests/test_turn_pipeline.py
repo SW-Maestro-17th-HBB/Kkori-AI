@@ -748,6 +748,31 @@ def test_wrap_up_cap_forces_final_question_without_orchestrator():
     assert env.pipeline.end_state.phase is EndPhase.WAITING_FINAL_ANSWER
 
 
+def test_first_answer_completed_in_wrap_up_forces_final_question():
+    cleanup = _CleanupSpy()
+    now = {"t": 0.0}
+    clock = InterviewClock(
+        duration_seconds=1800,
+        wrap_up_remaining_seconds=300,
+        hard_grace_seconds=180,
+        monotonic=lambda: now["t"],
+    )
+    clock.start()
+    env = _make(interview_clock=clock, cleanup_fn=cleanup)
+
+    async def scenario():
+        await env.pipeline.speak_initial("안녕하세요, 자기소개 부탁드립니다.")
+        now["t"] = 1560.0  # 첫 답변이 길어져 마무리 단계에서야 완료된 엣지
+        env.pipeline.on_user_turn_completed("아주 길었던 자기소개입니다.")
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    assert env.orch.calls == 0  # 첫 답변은 여전히 Orchestrator 미호출
+    final = env.log.utterances[-1]
+    assert final.question_type is QuestionType.FINAL  # 마무리 단계에 새 주제 없음
+    assert env.pipeline.end_state.phase is EndPhase.WAITING_FINAL_ANSWER
+
+
 def test_waiting_without_final_question_is_defended():
     cleanup = _CleanupSpy()
     env = _make(cleanup_fn=cleanup)

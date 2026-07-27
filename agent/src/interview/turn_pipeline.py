@@ -254,9 +254,15 @@ class TurnPipeline:
         마무리 단계(soft — docs/prd/interview-end.md §1)에서는 강제·폴백이
         NEXT_TOPIC 대신 FINAL_QUESTION으로 수렴한다(새 주제 금지).
         """
-        if not self._log.has_topic_or_followup_question():
-            return forced_next_topic()
         wrap_up_minutes = self._wrap_up_minutes()
+        if not self._log.has_topic_or_followup_question():
+            if wrap_up_minutes is not None:
+                # 첫 답변이 마무리 단계에서야 완료된 엣지 — 마무리 단계에 새 주제는
+                # 없으므로(NEXT_TOPIC 금지) 마지막 질문으로 보낸다. 워밍업 답변을
+                # Orchestrator로 평가하지 않는 원칙은 유지된다.
+                logger.info("첫 답변이 마무리 단계에 도달 — FINAL_QUESTION 강제")
+                return forced_final_question()
+            return forced_next_topic()
         if self._log.followup_count_in_current_branch() >= self._max_followups:
             if wrap_up_minutes is not None:
                 logger.info("줄기 상한 도달(마무리 단계) — FINAL_QUESTION 강제")
