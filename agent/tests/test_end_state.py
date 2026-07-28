@@ -5,21 +5,23 @@ import pytest
 from src.interview.end_state import EndCause, EndPhase, EndState
 
 
-def test_initial_phase_is_running_without_cause():
-    state = EndState()
+@pytest.fixture
+def state() -> EndState:
+    return EndState()
+
+
+def test_initial_phase_is_running_without_cause(state):
     assert state.phase is EndPhase.RUNNING
     assert state.cause is None
 
 
-def test_forward_transition_wins_and_duplicate_is_noop():
-    state = EndState()
+def test_forward_transition_wins_and_duplicate_is_noop(state):
     assert state.try_advance(EndPhase.WAITING_FINAL_ANSWER) is True
     assert state.try_advance(EndPhase.WAITING_FINAL_ANSWER) is False  # 중복 no-op
     assert state.phase is EndPhase.WAITING_FINAL_ANSWER
 
 
-def test_backward_transition_is_noop():
-    state = EndState()
+def test_backward_transition_is_noop(state):
     state.try_advance(EndPhase.CLOSING, EndCause.USER_REQUEST)
     state.try_advance(EndPhase.CLEANING)
     assert state.try_advance(EndPhase.CLOSING, EndCause.HARD_TIMEOUT) is False
@@ -27,46 +29,39 @@ def test_backward_transition_is_noop():
     assert state.cause is EndCause.USER_REQUEST  # 역방향 시도가 원인을 덮지 않는다
 
 
-def test_closing_requires_cause():
-    state = EndState()
+def test_closing_requires_cause(state):
     with pytest.raises(ValueError):
         state.try_advance(EndPhase.CLOSING)
 
 
-def test_cause_is_only_allowed_on_closing_entry():
-    state = EndState()
+def test_cause_is_only_allowed_on_closing_entry(state):
     with pytest.raises(ValueError):
         state.try_advance(EndPhase.WAITING_FINAL_ANSWER, EndCause.FINAL_QUESTION)
 
 
-def test_hard_promotes_waiting_final_answer_to_closing():
-    state = EndState()
+def test_hard_promotes_waiting_final_answer_to_closing(state):
     state.try_advance(EndPhase.WAITING_FINAL_ANSWER)
     assert state.try_advance(EndPhase.CLOSING, EndCause.HARD_TIMEOUT) is True
     assert state.cause is EndCause.HARD_TIMEOUT
 
 
-def test_closing_cause_is_first_wins():
-    state = EndState()
+def test_closing_cause_is_first_wins(state):
     assert state.try_advance(EndPhase.CLOSING, EndCause.USER_REQUEST) is True
     assert state.try_advance(EndPhase.CLOSING, EndCause.HARD_TIMEOUT) is False
     assert state.cause is EndCause.USER_REQUEST
 
 
-def test_running_can_enter_closing_directly():
-    state = EndState()
+def test_running_can_enter_closing_directly(state):
     assert state.try_advance(EndPhase.CLOSING, EndCause.LLM_END) is True
     assert state.phase is EndPhase.CLOSING
 
 
-def test_cannot_skip_closing_into_cleanup():
-    state = EndState()
+def test_cannot_skip_closing_into_cleanup(state):
     with pytest.raises(ValueError):
         state.try_advance(EndPhase.CLEANING)
 
 
-def test_full_forward_walk():
-    state = EndState()
+def test_full_forward_walk(state):
     assert state.try_advance(EndPhase.WAITING_FINAL_ANSWER) is True
     assert state.try_advance(EndPhase.CLOSING, EndCause.FINAL_QUESTION) is True
     assert state.try_advance(EndPhase.CLEANING) is True

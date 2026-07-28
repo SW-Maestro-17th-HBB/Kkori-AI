@@ -50,6 +50,12 @@ def test_marker_skipped_without_redis_config(monkeypatch):
     assert asyncio.run(write_termination_marker("123", "USER_REQUEST")) is False
 
 
+def test_marker_returns_false_on_malformed_url(monkeypatch):
+    # 클라이언트 생성 실패(ValueError)도 예외 전파가 아니라 실패 반환이다
+    monkeypatch.setenv(REDIS_URL_ENV, "not-a-url")
+    assert asyncio.run(write_termination_marker("123", "USER_REQUEST")) is False
+
+
 # --- Redis 사본 정리 (flush 성공 후 DEL — docs/prd/interview-end.md §4) ---
 
 @requires_redis
@@ -75,4 +81,12 @@ def test_purge_skipped_without_redis_config(monkeypatch):
     from src.interview.redis_sink import purge_transcript_copy
 
     monkeypatch.delenv(REDIS_URL_ENV, raising=False)
+    assert asyncio.run(purge_transcript_copy("123")) is False
+
+
+def test_purge_returns_false_on_malformed_url(monkeypatch):
+    from src.interview.redis_sink import purge_transcript_copy
+
+    # 클라이언트 생성 실패(ValueError)도 예외 전파가 아니라 실패 반환이다
+    monkeypatch.setenv(REDIS_URL_ENV, "not-a-url")
     assert asyncio.run(purge_transcript_copy("123")) is False

@@ -87,10 +87,31 @@ def test_room_delete_retries_bounded_then_exits():
         flush_fn=rec.step("flush", result=True),
         delete_room_fn=rec.step("delete", error=True),
         room_delete_max_attempts=2,
+        room_delete_backoff_seconds=0.001,  # 재시도 간 backoff — 테스트는 짧게
     )
     asyncio.run(seq.run(EndCause.HARD_TIMEOUT))
     assert rec.events == ["flush", "delete", "delete"]  # bounded retry 후 소진
     assert rec.shutdowns == ["interview end: HARD_TIMEOUT"]  # 소진에도 퇴장 보장
+
+
+def test_hanging_writer_close_is_bounded_by_timeout():
+    rec = _Recorder()
+
+    class _HangingWriter:
+        async def aclose(self):
+            await asyncio.sleep(3600)
+
+    seq = _sequence(
+        rec,
+        writer=_HangingWriter(),
+        flush_fn=rec.step("flush", result=True),
+        delete_room_fn=rec.step("delete"),
+        step_timeout_seconds=0.01,
+    )
+    # 외부 watchdog — 내부 타임아웃이 회귀하면 1시간 대기가 아니라 즉시 실패한다
+    asyncio.run(asyncio.wait_for(seq.run(EndCause.USER_REQUEST), timeout=0.5))
+    assert rec.events == ["flush", "delete"]  # writer hang이 시퀀스를 막지 않는다
+    assert rec.shutdowns == ["interview end: USER_REQUEST"]
 
 
 def test_hanging_step_is_bounded_by_timeout():
@@ -101,7 +122,8 @@ def test_hanging_step_is_bounded_by_timeout():
         delete_room_fn=rec.step("delete"),
         step_timeout_seconds=0.01,
     )
-    asyncio.run(seq.run(EndCause.USER_REQUEST))
+    # 외부 watchdog — 내부 타임아웃이 회귀하면 1시간 대기가 아니라 즉시 실패한다
+    asyncio.run(asyncio.wait_for(seq.run(EndCause.USER_REQUEST), timeout=0.5))
     assert rec.events == ["delete"]  # hang한 flush는 타임아웃으로 실패 처리
     assert rec.shutdowns == ["interview end: USER_REQUEST"]
 
