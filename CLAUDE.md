@@ -17,6 +17,8 @@ cd agent && uv run python -m src.main dev      # LiveKit Cloud에 워커 등록 
 uv add --project <서비스> <패키지>              # 의존성 추가 (해당 서비스의 uv.lock 자동 갱신)
 cd agent && uv run pytest                      # agent 테스트 (LLM 스모크는 KKORI_LIVE_LLM=1 설정 시에만 실호출)
 uv run --project worker pytest worker          # worker 테스트 (일부는 로컬 인프라 없으면 skip)
+cd worker && uv run faststream run src.main:app         # 이력서 분석 워커 실행
+cd worker && uv run faststream run src.report.main:app  # 리포트 생성 워커 실행 (별개 프로세스)
 docker build -f agent/Dockerfile -t kkori-agent .    # 이미지 빌드 — 컨텍스트는 반드시 레포 루트
 docker build -f worker/Dockerfile -t kkori-worker .
 ```
@@ -32,6 +34,7 @@ docker build -f worker/Dockerfile -t kkori-worker .
 
 ## 기술적 결정사항
 
+- **worker 는 파이프라인(도메인)별 독립 프로세스** — 한 코드베이스(worker/)지만 이력서(`src.main:app`)와 리포트(`src.report.main:app`)를 별개 앱으로 실행한다. 리포트는 LLM 의존이 크고 배포가 잦아 장애·배포를 격리하기 위함. 리포트 코드는 `src/report/` 도메인 패키지에 모으고, 공유는 `contract/`·`ai/`·`config.py` 같은 라이브러리 계층뿐. 회수·발행 모듈은 이력서 계약에 묶여 있어 리포트 몫을 복제했다 — 셋째 도메인이 생기면 공용화 검토
 - **서비스별 독립 uv 프로젝트 (워크스페이스 아님)** — 두 서비스는 상호 import 없이 독립 배포되므로 단일 락파일 워크스페이스 대신 서비스마다 자체 pyproject.toml·uv.lock을 둔다(서비스 간 잠금 결합 제거, 팀원 간 작업 충돌 방지). 각 Dockerfile이 자기 락파일로 `uv sync --locked --no-dev` 후 소스 복사. pyproject에 build-system 없이 `[tool.uv] package = false`로 의존성만 설치(현행 `src/` 레이아웃 유지)
 - **livekit-agents + LiveKit Inference** — 최종적으로 self-host SFU 예정이라 STT·LLM·TTS built-in이 없어 직접 연동이 필요하지만, 개발 단계에서는 LiveKit Cloud + Inference를 사용해 별도 프로바이더 API 키 없이 LiveKit 자격증명 하나로 동작. 모델 구성은 `agent/src/config.py` 상수로, 교체 시 상수만 변경
 - **자동 디스패치(임시)** — `agent_name` 미지정으로 모든 신규 룸에 에이전트가 자동 입장(테스트 편의). Spring이 `createDispatch(agentName)`로 명시 디스패치하는 방식은 세션 생성 스토리에서 전환
@@ -53,7 +56,7 @@ docker build -f worker/Dockerfile -t kkori-worker .
 | 필요한 정보 | 참조 문서 |
 |---|---|
 | 도메인 기능 요구사항, 정책, 검증 기준 | `docs/prd/<도메인>.md` (예정 — 폴더 아직 미생성) |
-| worker(이력서 분석) 요구사항·파이프라인 | `worker/docs/requirements/<도메인>/` (예: `resume-analysis/pipeline.md`) |
+| worker(이력서 분석·리포트 생성) 요구사항·평가 기준 | `worker/docs/requirements/<도메인>/` (예: `resume-analysis/pipeline.md`, `report-evaluation/evaluation-criteria.md`) |
 
 - `docs/drafts/` — 확정 전 초안 (gitignore, 커밋 금지). PRD가 생기기 전까지 설계 맥락이 필요하면 이 초안을 참조하되, 확정 문서가 아님을 전제할 것
 - 이슈/PR에서 PRD 참조 시 섹션 번호까지 명시 (예: `docs/prd/interview.md §7.1`)
