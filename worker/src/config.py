@@ -54,6 +54,9 @@ class Settings(BaseSettings):
 
     # --- Redis Stream 소비 (§9) ---
     consumer_group: str = "kkori-worker"
+    # 리포트 워커의 그룹 — 그룹은 스트림별 개념이라 같은 이름도 무방하지만,
+    # 프로세스 분리 운영에서 모니터링·설정을 구분하기 위해 이름을 나눈다.
+    report_consumer_group: str = "kkori-report-worker"
     consumer_name: str = ""  # 빈값이면 런타임에 hostname 사용(인스턴스 구분)
 
     # --- 재량 파라미터 (§9) ---
