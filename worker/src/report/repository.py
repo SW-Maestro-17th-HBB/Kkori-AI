@@ -6,8 +6,9 @@
   메시지와 같은 "계약 변경"** 으로 취급한다: 백엔드 엔티티·이 파일·테스트 스키마
   (conftest)를 한 커밋 단위로 함께 갱신할 것.
 - `report_generation_jobs` = **워커 소유** → 기동 시 멱등 DDL 생성 (resume_chunks 선례).
-- `interview_sessions`·`interview_transcripts` = 면접 도메인 소유, 워커는 읽기 전용.
-  두 테이블·컬럼명은 면접 도메인 구현(HBB1-142·287) 합의 전 잠정.
+- `interview_session`·`interview_transcripts` = 면접 도메인 소유, 워커는 읽기 전용.
+  `interview_session`(단수 명명)은 백엔드 develop 의 실물 엔티티에서 확인(2026-07-29).
+  `interview_transcripts` 는 에이전트 구현(HBB1-287) 합의 전 잠정.
 
 원칙 (이력서 repository.py 와 동일):
 - 상태 전이는 원자적 CAS: `UPDATE ... WHERE status = 이전상태`. 영향 행 0 = 다른
@@ -88,7 +89,7 @@ async def load_snapshot_source(conn: AsyncConnection, session_id: int) -> dict |
     cur = await conn.execute(
         """
         SELECT s.resume_id, r.original_file_name
-        FROM interview_sessions s
+        FROM interview_session s
         JOIN resumes r ON r.id = s.resume_id
         WHERE s.id = %s
         """,

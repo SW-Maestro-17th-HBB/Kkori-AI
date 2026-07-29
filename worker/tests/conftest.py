@@ -140,10 +140,11 @@ def test_db():
             )
             """
         )
-        # 면접 도메인 소유 — 워커는 읽기 전용. 형태는 면접 도메인 구현(HBB1-142·287) 전 잠정
+        # 면접 도메인 소유 — 워커는 읽기 전용. interview_session(단수)은 백엔드 실물 엔티티의
+        # 최소 형태(워커가 읽는 컬럼만), interview_transcripts 는 에이전트 구현(HBB1-287) 전 잠정
         conn.execute(
             """
-            CREATE TABLE IF NOT EXISTS interview_sessions (
+            CREATE TABLE IF NOT EXISTS interview_session (
                 id BIGSERIAL PRIMARY KEY,
                 user_id BIGINT NOT NULL,
                 resume_id BIGINT,
@@ -174,7 +175,7 @@ async def conn(test_db):
     await c.execute(
         "TRUNCATE resume_chunks, resume_analysis_status, resumes, "
         "reports, report_scores, report_feedbacks, report_generation_jobs, "
-        "interview_sessions, interview_transcripts"
+        "interview_session, interview_transcripts"
     )
     yield c
     await c.close()
@@ -203,7 +204,7 @@ async def seed_session(conn, user_id: int = 1, file_name: str = "이력서.pdf")
     )
     resume_id = (await cur.fetchone())["id"]
     cur = await conn.execute(
-        "INSERT INTO interview_sessions (user_id, resume_id) VALUES (%s, %s) RETURNING id",
+        "INSERT INTO interview_session (user_id, resume_id) VALUES (%s, %s) RETURNING id",
         (user_id, resume_id),
     )
     return (await cur.fetchone())["id"], resume_id
