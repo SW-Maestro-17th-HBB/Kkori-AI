@@ -46,6 +46,8 @@ class Settings(BaseSettings):
     # 계정이 소속된 조직의 SCP 가 Bedrock 을 us-east-1 에서만 허용한다(서울·global 프로파일 전부 거부).
     bedrock_region: str = "us-east-1"
     structuring_model_id: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+    # 리포트 답변 평가용 — 이력서 구조화와 같은 모델로 시작, 도메인별 독립 교체를 위해 분리
+    evaluation_model_id: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
     # Embed v4 — 출력 차원을 1024 로 지정해 vector(1024) 스키마를 유지한다 (§8)
     embedding_model_id: str = "cohere.embed-v4:0"
     embedding_dim: int = 1024  # 임베딩 모델의 출력 차원 설정에 종속 — 변경 시 스키마도 조정
