@@ -320,6 +320,16 @@ async def reset_job_retry(conn: AsyncConnection, report_id: int) -> None:
     )
 
 
+async def get_job_error(conn: AsyncConnection, report_id: int) -> str | None:
+    """기록된 마지막 오류 조회 — 포기 규칙이 실패 사유에 합류시키는 용도."""
+    cur = await conn.execute(
+        "SELECT error_message FROM report_generation_jobs WHERE report_id = %s",
+        (report_id,),
+    )
+    row = await cur.fetchone()
+    return row["error_message"] if row else None
+
+
 async def record_job_error(conn: AsyncConnection, report_id: int, summary: str) -> None:
     """진행 중 마지막 실패 원인 기록 (상태는 바꾸지 않음) — best-effort.
 
