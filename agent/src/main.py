@@ -34,8 +34,10 @@ from src.interview.question_generation import generate_question
 from src.interview.redis_sink import (
     REDIS_URL_ENV,
     create_transcript_writer,
+    purge_transcript_copy,
     write_termination_marker,
 )
+from src.interview.transcript_store import DATABASE_URL_ENV, flush_transcript
 from src.interview.turn_pipeline import SpeechResult, TurnPipeline
 from src.log_privacy import install_privacy_filter
 from src.session_context import parse_job_metadata
@@ -112,6 +114,10 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         logger.error("sessionId 있는 잡에 %s 미구성 — 시작 거부(fail-fast)", REDIS_URL_ENV)
         ctx.shutdown(reason="missing runtime config: redis")
         return
+    if session_id and not os.getenv(DATABASE_URL_ENV):
+        logger.error("sessionId 있는 잡에 %s 미구성 — 시작 거부(fail-fast)", DATABASE_URL_ENV)
+        ctx.shutdown(reason="missing runtime config: database")
+        return
 
     # 사용자 명시 종료 수신 — 리스너는 룸 이벤트가 흐르기 전(초기화 전)에 먼저 등록한다.
     # LiveKit data 메시지는 재전달되지 않으므로, 파이프라인 준비 전에 도착한 신호는
@@ -169,15 +175,24 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     )
 
     writer = create_transcript_writer(session_id)
+    log = ConversationLog()
 
     async def delete_room() -> None:
         await ctx.api.room.delete_room(api.DeleteRoomRequest(room=ctx.room.name))
 
-    # 종료 시퀀스 — flush(HBB1-287)·리포트 발행(HBB1-288)은 주입점만 정의된 상태.
-    # 룸 삭제는 운영 경로(sessionId 존재·실제 룸)에서만 수행한다.
+    async def flush() -> bool:
+        # flush 원본 = 메모리 완전본 (PRD §4) — 종료 시퀀스가 로그 확정 후 호출한다
+        return await flush_transcript(
+            session_id, [u.to_json_dict() for u in log.utterances]
+        )
+
+    # 종료 시퀀스 — 리포트 발행(HBB1-288)은 주입점만 정의된 상태.
+    # flush·정리·룸 삭제는 운영 경로(sessionId 존재)에서만 수행한다.
     end_sequence = EndSequence(
         shutdown_fn=lambda reason: ctx.shutdown(reason=reason),
         writer=writer,
+        flush_fn=flush if session_id else None,
+        purge_fn=(lambda: purge_transcript_copy(session_id)) if session_id else None,
         delete_room_fn=(
             delete_room if session_id and not ctx.is_fake_job() else None
         ),
@@ -188,7 +203,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             await write_termination_marker(session_id, str(cause))
 
     pipeline = TurnPipeline(
-        log=ConversationLog(),
+        log=log,
         writer=writer,
         orchestrator_fn=lambda log, wrap_up_minutes: decide(
             orchestrator_llm, log, wrap_up_remaining_minutes=wrap_up_minutes

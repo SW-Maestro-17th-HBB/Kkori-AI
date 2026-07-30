@@ -28,6 +28,18 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
+      # transcript flush 테스트용 — 로컬에서 없으면 해당 테스트만 skip, CI에서는 전부 실행
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
 
     steps:
       - uses: actions/checkout@v4

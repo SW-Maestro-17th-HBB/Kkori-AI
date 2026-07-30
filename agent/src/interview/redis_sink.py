@@ -145,6 +145,34 @@ async def write_termination_marker(session_id: str, cause: str) -> bool:
                 await redis.aclose()
 
 
+async def purge_transcript_copy(session_id: str) -> bool:
+    """Redis 전사 사본 정리(DEL) — flush 성공 후에만 호출된다(docs/prd/interview-end.md §4).
+
+    개인정보 잔존을 TTL 만료보다 앞당겨 제거한다. 실패해도 TTL 안전망이 남는다.
+    """
+    url = os.getenv(REDIS_URL_ENV)
+    if not url:
+        return False
+    redis: Redis | None = None
+    try:
+        # 클라이언트 생성도 실패 경로다 — 잘못된 URL(ValueError)이 실패 로그를
+        # 우회해 호출자로 전파되지 않게 try 안에서 만든다
+        redis = Redis.from_url(
+            url,
+            socket_timeout=_OP_TIMEOUT_SECONDS,
+            socket_connect_timeout=_OP_TIMEOUT_SECONDS,
+        )
+        await redis.delete(f"interview:{session_id}:transcript")
+        return True
+    except Exception as exc:
+        logger.warning("Redis 사본 정리 실패(%s) — TTL로 만료", type(exc).__name__)
+        return False
+    finally:
+        if redis is not None:
+            with suppress(Exception):
+                await redis.aclose()
+
+
 def create_transcript_writer(session_id: str | None) -> RedisTranscriptWriter | None:
     """env·sessionId가 갖춰졌을 때만 writer를 만들어 시작한다. 아니면 메모리 단독."""
     url = os.getenv(REDIS_URL_ENV)
