@@ -78,7 +78,9 @@ def test_malformed_url_returns_false_instead_of_raising(monkeypatch):
     assert asyncio.run(publish_report_request("123")) is False
 
 
-def test_client_creation_failure_retries_exactly_twice(monkeypatch):
+def test_client_creation_failure_retries_exactly_twice(monkeypatch, caplog):
+    import logging
+
     import src.interview.report_request as report_request
 
     monkeypatch.setenv(REDIS_URL_ENV, "not-a-url")
@@ -91,8 +93,14 @@ def test_client_creation_failure_retries_exactly_twice(monkeypatch):
             raise ValueError("malformed URL")
 
     monkeypatch.setattr(report_request, "Redis", _FailingFactory)
-    assert asyncio.run(publish_report_request("123")) is False
+    with caplog.at_level(logging.ERROR, logger="src.interview.report_request"):
+        assert asyncio.run(publish_report_request("123")) is False
     assert attempts["n"] == 2  # 생성 실패도 재시도 계약(정확히 2회)을 따른다
+    # 소진 시 sessionId 식별 로그 — 미발행 세션의 복구 재료 계약 (PRD §5)
+    assert any(
+        record.levelno == logging.ERROR and "sessionId=123" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 def test_first_failure_then_retry_succeeds(monkeypatch):
