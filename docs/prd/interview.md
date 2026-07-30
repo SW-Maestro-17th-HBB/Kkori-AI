@@ -26,12 +26,12 @@
 - metadata에서 세션 컨텍스트(sessionId, interviewType, position, resumeContext)를 파싱해 에이전트 세션 상태로 캐싱한다.
 - 시스템 프롬프트는 역할·지시(페르소나, 음성 제약)만 담고, 지원 직무·이력서 요약은 초기 질문 지시에 별도 주입한다. 대화 이력은 메시지 배열(ChatContext)로 관리하며 초기 질문 시점에는 이력이 없다.
 - **이력서 요약(resumeContext)은 질문 선택 판단 재료로만 주입한다** — 질문 문장은 검수 목록으로 고정되므로 요약이 질문 내용에 반영되지는 않는다(세부 경험 반영·RAG는 본론 질문 스토리에서 설계).
-- 예외: metadata 부재·파싱 실패 시(현 자동 디스패치 단계의 콘솔/Playground 테스트 포함) 직무·요약 없는 기본 질문 목록으로 폴백하고 경고 로그를 남긴다.
+- 예외: metadata 부재·파싱 실패 시(콘솔·metadata 없는 로컬 dispatch 테스트 포함) 직무·요약 없는 기본 질문 목록으로 폴백하고 경고 로그를 남긴다.
 
 ### 실행 조건
 
 - `agent/.env`에 LiveKit 자격증명 존재 (`agent/.env.example` 참조).
-- Spring 연동 이후: 세션 생성 시 명시 디스패치(`createDispatch`)의 metadata에 세션 컨텍스트가 포함되어야 한다. 연동 전(자동 디스패치 임시 단계)에는 폴백 경로로 동작한다.
+- 에이전트는 `agent_name` **`"kkori-interviewer"`**로 등록한다(명시 디스패치 — 자동 입장 없음, 확정). 운영 입장은 Spring이 세션 생성 시 `createDispatch(agentName, metadata)`로 수행하며 metadata에 세션 컨텍스트를 담는다. metadata 없는 dispatch(로컬 검증)는 폴백 경로로 동작한다.
 
 ### 검증 기준
 
@@ -46,11 +46,11 @@
 
 ### 인터페이스 요구사항
 
-- 디스패치 metadata(JSON). 필드 구성·명칭은 Spring 세션 생성 스토리와 합의 후 확정 **[미확정]**:
+- 디스패치 metadata(JSON). 필드 구성·명칭 **확정** (Spring 세션 생성 스토리와 합의 완료 — 아래 4개 필드가 전부, `sessionId`는 문자열, `resumeContext` 부재 시 필드 자체를 생략):
 
 ```json
 {
-  "sessionId": 123,
+  "sessionId": "123",
   "interviewType": "THIRTY_MIN",
   "position": "BACKEND",
   "resumeContext": "역할: 백엔드 (프로젝트: Kkori 결제 시스템) / 기술: Java, Spring, Redis"
@@ -58,14 +58,14 @@
 ```
 
 - `position`(지원 직무)은 **옵셔널**이며, 질문 목록의 `{position}` 문장에 **코드가 치환**한다. 없으면 해당 문장을 목록에서 제외하고 폴백한다. 직무별 프롬프트 분리는 하지 않는다 — 직무는 질문 로직을 바꾸지 않는 사실 정보이며, 직무별로 질문 로직 자체가 달라지는 요구는 `interviewType` 확장으로 다룬다.
-- `position`의 원천은 **Spring이 관리하는 직무 enum**(사용자가 UI에서 선택, 현재 `BACKEND`·`FRONTEND` 2종)이다. agent는 **코드→발화용 표시명 매핑**(`BACKEND`→"백엔드", `FRONTEND`→"프론트엔드")으로 변환해 치환하며, **발화에는 매핑된 표시명만 쓰인다** — 미등록 값은 직무 미지정으로 폴백하고 경고 로그를 남긴다(임의 문자열의 발화 유입 차단, 휴리스틱 정규화 불필요). 한국어 표시명 자체도 허용한다(픽스처·과도기 호환). enum 확장 시 agent 매핑을 동기화해야 하며, 최종 전달 형식은 세션 생성 계약에서 확정한다 **[미확정]**.
+- `position`의 원천은 **Spring이 관리하는 직무 enum**(사용자가 UI에서 선택, 현재 `BACKEND`·`FRONTEND` 2종)이다. agent는 **코드→발화용 표시명 매핑**(`BACKEND`→"백엔드", `FRONTEND`→"프론트엔드")으로 변환해 치환하며, **발화에는 매핑된 표시명만 쓰인다** — 미등록 값은 직무 미지정으로 폴백하고 경고 로그를 남긴다(임의 문자열의 발화 유입 차단, 휴리스틱 정규화 불필요). 한국어 표시명 자체도 허용한다(픽스처·과도기 호환). enum 확장 시 agent 매핑을 동기화해야 하며, 전달 형식은 **enum 코드 문자열**(`BACKEND`·`FRONTEND`)로 **확정**한다.
 - `resumeContext`(이력서 요약)도 **옵셔널**이다. 질문 선택 판단 재료로만 쓰이며, 없으면 목록에서 자유 선택한다.
-- 요약 출처(방향): Spring이 세션 생성 시 worker 분석 결과인 `resumes.structured_data`(skills/projects/experiences)에서 직무·기술·경력을 **코드로 조립**한다(별도 LLM 요약 미사용) **[미확정 — 세션 생성 스토리에서 확정]**.
-- Spring 연동 전(자동 디스패치 임시 단계)의 개발·테스트는 **픽스처**(환경 변수 `KKORI_POSITION_FIXTURE`·`KKORI_RESUME_CONTEXT_FIXTURE`)로 수행한다. 픽스처는 **metadata가 아예 없을 때만** 적용된다 — metadata가 존재하면 누락 필드에 픽스처를 섞지 않는다.
+- 요약 출처 **확정**: Spring이 세션 생성 시 worker 분석 결과인 `resumes.structured_data`(skills/projects/experiences)에서 직무·기술·경력을 **코드로 조립**한다(별도 LLM 요약 미사용). 조립 결과가 없으면 `resumeContext` 필드를 생략한다.
+- **metadata 없는 dispatch** 로컬 테스트(콘솔 모드, `lk dispatch create` metadata 생략)는 **픽스처**(환경 변수 `KKORI_POSITION_FIXTURE`·`KKORI_RESUME_CONTEXT_FIXTURE`)로 수행한다. 픽스처는 **metadata가 아예 없을 때만** 적용된다 — metadata가 존재하면 누락 필드에 픽스처를 섞지 않는다.
 
 ### 제약사항
 
-- interviewType의 원천은 **Spring이 관리하는 면접 유형 enum**(사용자가 UI에서 선택, `THIRTY_MIN`·`FIVE_MIN` 2종)이며 이 중 `THIRTY_MIN`만 지원한다. `FIVE_MIN`(5분 CS) 파이프라인은 별도 스토리에서 설계하며, 그 전까지 수신 시 경고 로그 후 `THIRTY_MIN`과 동일하게 진행한다(동일 진행 유지 여부는 5분 설계 시 확정) **[미확정]**.
+- interviewType의 원천은 **Spring이 관리하는 면접 유형 enum**(사용자가 UI에서 선택, `THIRTY_MIN`·`FIVE_MIN` 2종)이며 이 중 `THIRTY_MIN`만 지원한다. `FIVE_MIN`(5분 CS) 파이프라인은 별도 스토리에서 설계하며, 그 전까지 수신 시 경고 로그 후 `THIRTY_MIN`과 동일하게 진행한다(**확정** — 5분 스토리 전까지 현행 유지, 동일 진행 지속 여부는 5분 설계 시 재확정).
 - 이력서는 요약(resumeContext)만 주입한다. 원문·상세 RAG 결과는 주입하지 않는다(본론 질문 스토리에서 설계).
 
 ### 기타 요구사항
