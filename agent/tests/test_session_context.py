@@ -5,6 +5,32 @@ import json
 from src.session_context import INTERVIEW_TYPE_THIRTY_MIN, SessionContext, parse_job_metadata
 
 
+# 세션 생성 계약 샘플 (docs/prd/interview.md §1 확정) — Spring 레포 테스트와 자구까지
+# 동일한 JSON을 유지한다. 변경은 양쪽 합의 없이는 금지.
+CONTRACT_SAMPLE_METADATA = (
+    '{"sessionId": "123", "interviewType": "THIRTY_MIN", "position": "BACKEND",'
+    ' "resumeContext": "역할: 백엔드 (프로젝트: Kkori 결제 시스템) / 기술: Java, Spring, Redis"}'
+)
+
+
+def test_contract_sample_metadata():
+    assert parse_job_metadata(CONTRACT_SAMPLE_METADATA) == SessionContext(
+        session_id="123",
+        interview_type="THIRTY_MIN",
+        position="BACKEND",
+        resume_context="역할: 백엔드 (프로젝트: Kkori 결제 시스템) / 기술: Java, Spring, Redis",
+    )
+
+
+def test_contract_sample_without_resume_context():
+    # resumeContext는 조립 결과가 없으면 필드 자체를 생략한다 (계약)
+    ctx = parse_job_metadata(
+        '{"sessionId": "123", "interviewType": "THIRTY_MIN", "position": "BACKEND"}'
+    )
+    assert ctx.session_id == "123"
+    assert ctx.resume_context is None
+
+
 def test_full_metadata():
     ctx = parse_job_metadata(
         json.dumps(
