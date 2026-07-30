@@ -37,6 +37,7 @@ from src.interview.redis_sink import (
     purge_transcript_copy,
     write_termination_marker,
 )
+from src.interview.report_request import publish_report_request
 from src.interview.transcript_store import DATABASE_URL_ENV, flush_transcript
 from src.interview.turn_pipeline import SpeechResult, TurnPipeline
 from src.log_privacy import install_privacy_filter
@@ -186,13 +187,15 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             session_id, [u.to_json_dict() for u in log.utterances]
         )
 
-    # 종료 시퀀스 — 리포트 발행(HBB1-288)은 주입점만 정의된 상태.
-    # flush·정리·룸 삭제는 운영 경로(sessionId 존재)에서만 수행한다.
+    # 종료 시퀀스 — flush·정리·발행·룸 삭제는 운영 경로(sessionId 존재)에서만 수행한다.
     end_sequence = EndSequence(
         shutdown_fn=lambda reason: ctx.shutdown(reason=reason),
         writer=writer,
         flush_fn=flush if session_id else None,
         purge_fn=(lambda: purge_transcript_copy(session_id)) if session_id else None,
+        publish_fn=(
+            (lambda: publish_report_request(session_id)) if session_id else None
+        ),
         delete_room_fn=(
             delete_room if session_id and not ctx.is_fake_job() else None
         ),
