@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 
 from redis.asyncio import Redis
 
@@ -95,6 +96,9 @@ async def startup() -> None:
 async def shutdown() -> None:
     if _Resources.reclaim_task is not None:
         _Resources.reclaim_task.cancel()
+        # 취소 완료까지 대기 — 루프가 닫히기 전에 태스크 정리를 끝낸다 (리뷰 반영)
+        with contextlib.suppress(asyncio.CancelledError):
+            await _Resources.reclaim_task
 
 
 @broker.subscriber(
