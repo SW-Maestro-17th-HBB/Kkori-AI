@@ -38,4 +38,4 @@ ROOM_DELETE_MAX_ATTEMPTS = 3  # 룸 삭제 bounded retry — best-effort 단계�
 ROOM_DELETE_RETRY_BACKOFF_SECONDS = 2  # 재시도 간격 — 연속 재시도는 같은 일시 장애 창에서 전부 실패한다
 
 # 리포트 생성 요청 발행 — docs/prd/interview-end.md §5
-REPORT_REQUEST_STREAM_KEY = "interview:report:requests"  # [미확정 — worker 스토리와 합의]
+REPORT_REQUEST_STREAM_KEY = "report.generation.requested"

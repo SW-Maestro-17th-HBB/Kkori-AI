@@ -267,7 +267,7 @@
 flush 성공 후 리포트 생성을 비동기로 트리거하는 메시지를 발행한다. 리포트 생성 자체는 worker의 별도 스토리다.
 
 - **발행 시점: flush 성공 직후에만**. 리포트는 DB의 transcript를 읽으므로, flush가 없으면(실패·생략) 발행도 생략한다(오류 로그) — transcript 없는 리포트 요청은 소비자를 실패시킬 뿐이다.
-- **채널: Redis Stream(`XADD`)**. worker가 FastStream 컨슈머로 소비한다(드래프트 §7.6의 비동기 평가 큐). 스트림 키·컨슈머 그룹은 worker와 협의해 확정 **[미확정 — 제안: `interview:report:requests`]**.
+- **채널: Redis Stream(`XADD`)**. worker가 FastStream 컨슈머로 소비한다(드래프트 §7.6의 비동기 평가 큐). 스트림 키는 `report.generation.requested`(확정 — worker 합의), 컨슈머 그룹은 worker 스토리에서 확정.
 - **메시지는 포인터다**: 전사 본문을 메시지에 넣지 않는다 — worker가 session_id로 DB에서 읽는다. 페이로드(확정 — worker 합의): `{"session_id": ...}` **단일 필드**. 발행 시각은 별도 필드로 넣지 않는다 — 스트림 entry ID(`<밀리초 타임스탬프>-<시퀀스>`)에 내장돼 있고, 단일 Redis 서버 시계 기준이라 agent 벽시계보다 일관적이다.
 - **실패 정책**: 발행 실패 시 1회 재시도(타임아웃 포함 — §3), 소진 시 **식별 가능한 오류 로그**(sessionId 포함 마커)를 남기고 종료 시퀀스를 계속한다(§3). 이 경우 유실되는 것은 트리거뿐이고 transcript는 DB에 있다 — **"transcript 행 존재 & 리포트 없음"이 미발행 검출식**이다. 미발행 감지·재발행(reconciliation)은 "추후"가 아니라 **리포트 생성 스토리(worker)의 완료 조건으로 이관을 명시**한다 — 이 계약을 해당 스토리 이슈에 반영해야 이 스토리의 실패 정책이 성립한다. 이관하는 완료 조건: (1) transcript 존재 + 리포트 부재 세션의 감지, (2) 재발행으로 리포트 생성, (3) 기존 발행과 경합해도 sessionId 기준 결과가 정확히 1개(소비 측 멱등). 해당 worker 이슈를 이 스토리의 연관 이슈로 연결한다.
 - **대안 비교(transactional outbox — 채택 안 함)**: transcript INSERT와 발행 요청을 같은 트랜잭션에 쓰고 별도 퍼블리셔가 스트림으로 중계하면 dual-write 유실이 구조적으로 사라지지만, 세션 단위로 뜨고 사라지는 agent 수명 모델에 상주 퍼블리셔·outbox 테이블 인프라가 추가된다. 검출식과 재발행 책임(worker)이 정의된 현 구조로 시작하고, 미발행이 실측에서 반복되면 outbox(또는 worker가 outbox 테이블을 직접 소비)로 전환한다 **[미확정 — worker 스토리 협의 시 재검토]**.
