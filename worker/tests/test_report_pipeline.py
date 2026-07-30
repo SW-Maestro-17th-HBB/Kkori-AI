@@ -57,7 +57,7 @@ async def seed_ready_session(conn) -> int:
 async def run(conn, session_id, *, evaluator=None, publish=None, delivery_count=1,
               is_reclaimed=False):
     await process_generation_request(
-        ReportGenerationRequested(sessionId=session_id, userId=1),
+        ReportGenerationRequested(sessionId=session_id),
         conn=conn,
         evaluator=evaluator if evaluator is not None else FakeEvaluator(),
         publish=publish if publish is not None else PublishSpy(),

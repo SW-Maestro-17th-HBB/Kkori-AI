@@ -90,10 +90,13 @@ async def test_같은_세션_중복_생성은_None_부분로우_없음(conn):
 
 
 @pytest.mark.asyncio
-async def test_스냅샷_재료_조회(conn):
-    session_id, resume_id = await seed_session(conn, file_name="포트폴리오.pdf")
+async def test_생성_재료_조회는_소유자를_포함한다(conn):
+    session_id, resume_id = await seed_session(conn, user_id=5, file_name="포트폴리오.pdf")
     source = await repo.load_snapshot_source(conn, session_id)
-    assert source == {"resume_id": resume_id, "original_file_name": "포트폴리오.pdf"}
+    # user_id 포함 — 생성 요청 메시지는 sessionId 만 담아 소유자의 출처는 세션 행이다
+    assert source == {
+        "user_id": 5, "resume_id": resume_id, "original_file_name": "포트폴리오.pdf",
+    }
     assert await repo.load_snapshot_source(conn, session_id + 999) is None  # 유령 세션
 
 

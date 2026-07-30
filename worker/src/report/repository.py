@@ -81,14 +81,17 @@ async def get_report_by_session(conn: AsyncConnection, session_id: int) -> dict 
 
 
 async def load_snapshot_source(conn: AsyncConnection, session_id: int) -> dict | None:
-    """스냅샷 재료 — 세션이 사용한 이력서의 id·원본 파일명 (resume_id, original_file_name).
+    """리포트 생성 재료 — 세션 소유자와 사용 이력서의 id·원본 파일명
+    (user_id, resume_id, original_file_name).
 
+    소유자를 여기서 읽는 이유: 생성 요청 메시지는 sessionId 만 담는 포인터 계약이라
+    (2026-07-30 면접 도메인 합의) 소유자의 출처는 세션 행 하나다.
     세션이 없거나 이력서를 못 찾으면 None(유령 이벤트 — 스킵 대상). 이력서의
     soft-delete 는 무시하고 읽는다 — 스냅샷은 삭제 여부와 무관하게 파일명만 필요하다.
     """
     cur = await conn.execute(
         """
-        SELECT s.resume_id, r.original_file_name
+        SELECT s.user_id, s.resume_id, r.original_file_name
         FROM interview_session s
         JOIN resumes r ON r.id = s.resume_id
         WHERE s.id = %s

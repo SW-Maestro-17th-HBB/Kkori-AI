@@ -76,7 +76,7 @@ async def test_방치_메시지를_회수해_재처리하고_ACK한다(conn, red
     session_id, _ = await seed_session(conn)
     await seed_transcript(conn, session_id, UTTERANCES)
     await dead_worker_takes(
-        redis, ReportGenerationRequested(sessionId=session_id, userId=1).encode()
+        redis, ReportGenerationRequested(sessionId=session_id).encode()
     )
     settings = reclaim_settings(str(conn.info.dsn))
 
@@ -118,7 +118,7 @@ async def test_재처리_실패_메시지는_PEL에_남는다(conn, redis):
     session_id, _ = await seed_session(conn)
     await seed_transcript(conn, session_id, UTTERANCES)
     await dead_worker_takes(
-        redis, ReportGenerationRequested(sessionId=session_id, userId=1).encode()
+        redis, ReportGenerationRequested(sessionId=session_id).encode()
     )
     settings = reclaim_settings(str(conn.info.dsn))
 

@@ -43,7 +43,15 @@ def test_예시_왕복_decode_후_encode가_원본과_같다(example, model):
 def test_생성요청_필드값이_예시와_일치한다():
     msg = ReportGenerationRequested.decode(_load("generation_requested.json"))
     assert msg.sessionId == 17
-    assert msg.userId == 3
+
+
+def test_생성요청_모르는_필드는_무시한다():
+    """발행 측이 덧붙이는 부가 필드(requestedAt 등)는 계약 위반이 아니다 (2026-07-30 합의)."""
+    msg = ReportGenerationRequested.decode(
+        {"sessionId": "17", "requestedAt": "2026-07-30T10:00:00Z"}
+    )
+    assert msg.sessionId == 17
+    assert msg.encode() == {"sessionId": "17"}  # 무시된 필드는 재발행에도 없다
 
 
 def test_상태메시지_status는_계약의_4상태만_허용한다():
@@ -62,11 +70,11 @@ def test_상태메시지_message_없으면_빈문자열로_encode된다():
 
 def test_필수필드_누락은_검증오류다():
     with pytest.raises(ValidationError):
-        ReportGenerationRequested.decode({"sessionId": "17"})  # userId 누락
+        ReportGenerationRequested.decode({"requestedAt": "2026-07-30T10:00:00Z"})  # sessionId 누락
     with pytest.raises(ValidationError):
         RegenerateRequested.decode({"reportId": "7", "userId": "3"})  # sessionId 누락
 
 
 def test_숫자필드에_문자가_오면_검증오류다():
     with pytest.raises(ValidationError):
-        ReportGenerationRequested.decode({"sessionId": "abc", "userId": "3"})
+        ReportGenerationRequested.decode({"sessionId": "abc"})

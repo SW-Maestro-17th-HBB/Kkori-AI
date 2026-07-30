@@ -82,16 +82,19 @@ async def process_generation_request(
     리셋하고 진행 중(PROCESSING) 로우를 만나면 양보하지만, 회수 경로는 이전 처리자가
     죽었다는 판정이므로 리셋 없이 이어서 재개한다.
     """
-    sid, uid = request.sessionId, request.userId
+    # 소유자(user_id)는 메시지에 없다 — sessionId 만 담는 포인터 계약(2026-07-30 합의).
+    # 리포트 행이 있으면 행에서, 없으면 세션 행에서 읽는다.
+    sid = request.sessionId
     report = await get_report_by_session(conn, sid)
 
     # 1. 포기 규칙: 임계 도달 시 재처리 없이 FAILED 확정 → 정상 반환(=ACK).
     #    이 순서 고정 — 도중에 죽어도 재전달본이 같은 경로로 수렴한다(mark_failed 멱등).
     if delivery_count >= settings.delivery_count_threshold:
-        await _give_up(conn, report, uid, publish, delivery_count)
+        await _give_up(conn, report, publish, delivery_count)
         return
 
     if report is not None:
+        uid = report["user_id"]
         # 2a. 종결 상태 = at-least-once 중복 → 스킵, 이벤트 재발행 없음
         if report["status"] in _TERMINAL:
             return
@@ -118,6 +121,7 @@ async def process_generation_request(
         if source is None:
             logger.warning("세션 또는 이력서 없는 생성 요청 스킵 (session_id=%s)", sid)
             return
+        uid = source["user_id"]
         report_id = await create_report_with_job(
             conn,
             session_id=sid,
@@ -175,7 +179,6 @@ async def process_generation_request(
 async def _give_up(
     conn: AsyncConnection,
     report: dict | None,
-    user_id: int,
     publish: PublishStatus,
     delivery_count: int,
 ) -> None:
@@ -188,7 +191,7 @@ async def _give_up(
     last = await get_job_error(conn, report["id"])
     detail = f"{simple} — 마지막 오류: {last}" if last else simple
     if await mark_failed(conn, report["id"], detail):
-        await publish(report["id"], user_id, ReportStatus.FAILED, simple)
+        await publish(report["id"], report["user_id"], ReportStatus.FAILED, simple)
 
 
 async def _with_retry(

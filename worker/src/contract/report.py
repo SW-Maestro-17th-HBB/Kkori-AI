@@ -4,9 +4,9 @@
 `Kkori-Backend` docs/requirements/report/report.md §1 인터페이스 요구사항).
 필드명은 전송 계약의 키와 1:1로 맞추기 위해 camelCase 를 그대로 쓴다.
 
-주의: 세션 도메인이 발행하는 두 메시지(GenerationRequested/AudioAnalysisRequested)의 필드와
-스트림 키 이름은 **면접 도메인과 합의 전 잠정**이다 — 합의 확정 시 백엔드 계약
-record와 함께 이 파일·골든 샘플을 한 커밋으로 갱신한다.
+주의: AudioAnalysisRequested 의 필드와 스트림 키 이름은 **면접 도메인과 합의 전
+잠정**이다 — 합의 확정 시 백엔드 계약 record와 함께 이 파일·골든 샘플을 한 커밋으로
+갱신한다. (GenerationRequested 는 2026-07-30 면접 도메인과 합의 확정)
 """
 
 from __future__ import annotations
@@ -43,22 +43,24 @@ class ImprovementTask(BaseModel):
 class ReportGenerationRequested(BaseModel):
     """`report.generation.requested` — 워커가 소비하는 리포트 생성 요청.
 
-    세션 도메인이 실전(30분) 면접의 정상 종료 시에만 발행한다("리포트가 필요하다"는
-    요청 — 이력서의 resume.parse.requested 와 같은 요청형 계약).
+    면접 도메인(에이전트)이 대본 저장 성공 후 발행한다("리포트가 필요하다"는 요청 —
+    이력서의 resume.parse.requested 와 같은 요청형 계약, 2026-07-30 합의 확정).
+    메시지는 포인터다 — 필수 필드는 sessionId(interview_session PK) 하나이고,
+    소유자·이력서 정보는 워커가 세션 행에서 읽는다. 발행 측이 덧붙이는 그 외 필드
+    (requestedAt 등)는 소비 측이 무시한다(pydantic 기본 동작).
     at-least-once 중복 전달에 대비해 소비 처리는 sessionId 기준 멱등이어야 한다.
     """
 
     STREAM_KEY: ClassVar[str] = "report.generation.requested"
 
     sessionId: int
-    userId: int
 
     @classmethod
     def decode(cls, fields: Mapping[str, str]) -> "ReportGenerationRequested":
         return cls.model_validate(dict(fields))
 
     def encode(self) -> dict[str, str]:
-        return {"sessionId": str(self.sessionId), "userId": str(self.userId)}
+        return {"sessionId": str(self.sessionId)}
 
 
 class AudioAnalysisRequested(BaseModel):
