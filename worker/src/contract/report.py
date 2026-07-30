@@ -14,7 +14,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import ClassVar, Mapping
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 
 class ReportStatus(str, Enum):
@@ -119,6 +119,8 @@ class ReportStatusChanged(BaseModel):
     """`report.status.changed` — 워커가 상태 전이마다 발행, Spring이 소비(SSE 중계).
 
     PENDING 은 발행하지 않는다(로우 생성 직후의 짧은 초기 상태 — 백엔드 PRD §5).
+    이 규칙은 모델 검증이 강제한다 — 이벤트에 실리는 상태는 PROCESSING·COMPLETED·FAILED
+    세 가지뿐이라는 것이 Spring·프론트 소비 구현의 전제다.
     """
 
     STREAM_KEY: ClassVar[str] = "report.status.changed"
@@ -126,6 +128,13 @@ class ReportStatusChanged(BaseModel):
     reportId: int
     userId: int
     status: ReportStatus
+
+    @field_validator("status")
+    @classmethod
+    def _reject_pending(cls, status: ReportStatus) -> ReportStatus:
+        if status is ReportStatus.PENDING:
+            raise ValueError("PENDING 은 발행 대상이 아니다 — 내부 초기 상태 (백엔드 PRD §5)")
+        return status
     # status로 유도할 수 없는 정보(실패 사유 등). 계약상 null 은 "" 로 직렬화한다.
     message: str = ""
 

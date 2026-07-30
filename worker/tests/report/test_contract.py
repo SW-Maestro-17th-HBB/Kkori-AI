@@ -54,12 +54,16 @@ def test_생성요청_모르는_필드는_무시한다():
     assert msg.encode() == {"sessionId": "17"}  # 무시된 필드는 재발행에도 없다
 
 
-def test_상태메시지_status는_계약의_4상태만_허용한다():
+def test_상태메시지_status는_발행_대상_3상태만_허용한다():
     fields = _load("report_status_changed.json")
     assert ReportStatusChanged.decode(fields).status == ReportStatus.PROCESSING
+    for status in ("COMPLETED", "FAILED"):
+        assert ReportStatusChanged.decode({**fields, "status": status}).status.value == status
 
     with pytest.raises(ValidationError):
-        ReportStatusChanged.decode({**fields, "status": "EVALUATING"})
+        ReportStatusChanged.decode({**fields, "status": "EVALUATING"})  # 계약 밖 상태
+    with pytest.raises(ValidationError):
+        ReportStatusChanged.decode({**fields, "status": "PENDING"})  # 내부 상태 — 발행 금지
 
 
 def test_상태메시지_message_없으면_빈문자열로_encode된다():
