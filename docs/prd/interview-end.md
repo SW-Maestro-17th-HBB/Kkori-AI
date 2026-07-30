@@ -168,7 +168,7 @@
 
   **transcript 행을 1순위로 두는 근거**: 비정상 경로는 flush하지 않으므로(§4 — DB INSERT는 정상 종료 시퀀스에서만 일어난다) 행 존재 단독으로 정상 종료의 증거다. 표식은 best-effort라 "표식 없음"이 "종료 아님"을 뜻하지 않는다 — 표식 기록만 실패하고 flush는 성공한 세션도 이 우선순위가 `ENDED`로 정확히 수렴시킨다.
 
-  이 표의 세 경로는 **후속 Spring 스토리의 완료 조건으로 이관**한다 — agent 측 검증은 표식·transcript 행의 기록까지고(검증 기준), 표식을 조회해 재dispatch를 막는 동작의 검증은 Spring 스토리가 담당한다(해당 이슈에 이 계약을 반영해야 이 판별이 성립한다). 이 판별은 **공유 인프라 전제**(Spring이 agent의 Redis·Postgres를 직접 읽는다) 위에서 성립하며, 이 전제의 성립 확인도 같은 후속 스토리 완료 조건으로 함께 이관한다.
+  이 표의 세 경로는 **후속 Spring 스토리의 완료 조건으로 이관**한다(fallback 선기록의 판별 포함 — 아래 ack 부재 보완) — agent 측 검증은 표식·transcript 행의 기록까지고(검증 기준), 표식을 조회해 재dispatch를 막는 동작의 검증은 Spring 스토리가 담당한다(해당 이슈에 이 계약을 반영해야 이 판별이 성립한다). 이 판별은 **공유 인프라 전제**(Spring이 agent의 Redis·Postgres를 직접 읽는다) 위에서 성립하며, 이 전제의 성립 확인도 같은 후속 스토리 완료 조건으로 함께 이관한다.
 - **사용자 명시 종료 수신 = 서버 API data 메시지(`SendData`) (확정)**: 프론트 → Spring `POST /sessions/{id}/end` → Spring이 LiveKit 서버 API `SendData`로 룸에 종료 신호를 보내고(topic 기반), agent가 `data_received` 이벤트로 수신해 정상 종료 시퀀스(클로징 포함)를 실행한다. 종료 요청의 관문을 Spring 하나로 유지한다(상태 단일 소스 원칙). **수신 검증(신뢰 경계)** — 다음을 모두 만족할 때만 종료 신호로 처리하고, 하나라도 어긋나면 무시한다: (1) **발신자가 서버 API일 것** — 서버 SDK 발신 data 패킷은 발신 participant가 없다(`participant is None`)는 것으로 구분한다, (2) 종료 topic 일치, (3) payload의 sessionId가 현재 세션과 일치. 특히 **참가자(candidate 포함)가 보낸 동일 topic 메시지는 무시**한다 — 프론트·참가자가 Spring 관문을 우회해 종료를 트리거할 수 없다.
   - **ack 부재 보완**: SendData는 응답이 없다(fire-and-forget) — agent의 정상 처리는 룸 삭제 → `room_finished` webhook이 사실상의 ack다. 일정 시간 내 `room_finished`가 오지 않으면 Spring이 룸을 직접 삭제하는 타임아웃 fallback을 계약에 둔다(agent가 신호를 처리하지 못하는 비정상 상태 — flush 유실 감수). 단, **fallback 삭제도 같은 `room_finished`를 발생시키므로 webhook만으로는 정상 종료와 구분할 수 없다** — Spring은 fallback 삭제 **전에** 종료 결과를 먼저 상태로 기록(선기록 후 삭제)하고, 이후 도착하는 `room_finished`는 terminal no-op으로 수렴시킨다(webhook은 룸 정리 확인 용도). fallback 계약 **확정** — 선기록 후 룸 삭제이며, **선기록도 위 판별표를 따른다**: `ABORTED`를 기록하기 **전에** transcript 행·종료 표식을 판별표와 같은 우선순위로 조회해, transcript 행이 있으면(= agent가 flush까지 완료하고 룸 삭제만 지연·실패한 경우) `ENDED`로 기록하고 룸 정리만 수행한다 — 정상 종료 세션이 fallback 경합으로 `ABORTED`로 남는 것을 막는다. 조회와 기록 사이의 잔여 경합 창은 감수한다(fallback 타임아웃을 종료 시퀀스 소요보다 충분히 크게 잡는 전제 — 값·경합 창 좁히기는 후속 스토리 실측에서). 타임아웃 값은 후속 Spring 스토리에서 확정 **[미확정 — 타임아웃 값]**.
   - topic 명칭·페이로드 스키마 **확정**: topic `interview:end`(config `INTERVIEW_END_TOPIC` 현행 값), 페이로드 `{"sessionId": "..."}`(sessionId 검증용 최소 구성).
@@ -204,7 +204,7 @@
 
 ### 제약사항
 
-- 세션 상태 전이는 실행하지 않는다 — Spring 단일 소스 원칙. **Spring 상태 전이를 유발하는 신호는 룸 종료 이벤트뿐**이다(종료 표식·transcript 행은 Spring이 판별 시 조회하는 재료이지, 전이를 push하는 신호가 아니다).
+- 세션 상태 전이는 실행하지 않는다 — Spring 단일 소스 원칙. **agent 발 신호 중 Spring 상태 전이를 유발하는 것은 룸 종료 이벤트(`room_finished`)뿐**이다(종료 표식·transcript 행은 Spring이 판별 시 조회하는 재료이지, 전이를 push하는 신호가 아니다). fallback 선기록(ack 부재 보완 — 본문 §3)은 이 제약과 별개다: agent 신호가 아니라 **Spring 자체 타임아웃**으로 실행되는 두 번째 terminal 전이 경로(확정)이며, 이후 도착하는 `room_finished`는 terminal no-op으로 수렴한다.
 - Spring 측 종료 API·webhook 핸들러·상태 머신 구현은 범위 외(계약만 정의).
 
 ### 기타 요구사항
