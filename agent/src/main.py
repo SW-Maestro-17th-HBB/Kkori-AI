@@ -8,6 +8,7 @@ from livekit import agents, api
 from livekit.agents import Agent, AgentServer, AgentSession, TurnHandlingOptions, inference
 
 from src.config import (
+    AGENT_NAME,
     HARD_OVERRUN_GRACE_SECONDS,
     INTERVIEW_DURATION_SECONDS,
     INTERVIEW_END_TOPIC,
@@ -92,7 +93,9 @@ def _make_say_fn(session: AgentSession):
 server = AgentServer()
 
 
-@server.rtc_session()
+# agent_name 등록 = 자동 디스패치 종료 — 입장은 Spring createDispatch(agentName, metadata)
+# 또는 로컬 lk dispatch create가 담당한다 (docs/prd/interview.md §1)
+@server.rtc_session(agent_name=AGENT_NAME)
 async def entrypoint(ctx: agents.JobContext) -> None:
     # cli.run_app이 늦게 구성한 핸들러에도 마스킹 필터를 적용한다 (멱등)
     install_privacy_filter()
@@ -104,7 +107,8 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         position = session_context.position
         resume_context = session_context.resume_context
     else:
-        # Spring 연동 전 픽스처 검증용 — metadata가 아예 없을 때만 환경 변수로 주입
+        # metadata 없는 dispatch(콘솔·lk dispatch create) 로컬 테스트용 —
+        # metadata가 아예 없을 때만 환경 변수로 주입
         position = os.getenv("KKORI_POSITION_FIXTURE")
         resume_context = os.getenv("KKORI_RESUME_CONTEXT_FIXTURE")
 

@@ -25,7 +25,7 @@ def parse_job_metadata(raw: str) -> SessionContext:
     """metadata JSON을 세션 컨텍스트로 파싱한다.
 
     부재·형식 오류 시 폴백 컨텍스트를 반환한다
-    (자동 디스패치 임시 단계의 콘솔/Playground 테스트 포함).
+    (콘솔·metadata 없는 로컬 dispatch 테스트 포함).
     resume_context 원문은 개인정보이므로 로그에 남기지 않는다.
     """
     if not raw:
