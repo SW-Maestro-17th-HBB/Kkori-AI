@@ -33,18 +33,16 @@ def test_publish_appends_pointer_message_to_stream(monkeypatch):
     session_id = f"{uuid.uuid4().int % 10**10}"
     client = sync_redis.Redis.from_url(LOCAL_URL, decode_responses=True)
     try:
-        last_id = "$"
-        info = client.xinfo_stream(REPORT_REQUEST_STREAM_KEY) if client.exists(
-            REPORT_REQUEST_STREAM_KEY
-        ) else None
-        if info:
-            last_id = info["last-generated-id"]
-
         assert asyncio.run(publish_report_request(session_id)) is True
 
-        entries = client.xrange(REPORT_REQUEST_STREAM_KEY, min=f"({last_id}" if last_id != "$" else "-")
-        fields = entries[-1][1]
-        assert fields["sessionId"] == session_id
+        # 마지막 항목이 이 테스트의 메시지라고 가정하지 않는다 —
+        # 병렬 테스트·외부 발행과 무관하게 sessionId로 찾는다
+        entries = client.xrange(REPORT_REQUEST_STREAM_KEY)
+        matching = [
+            fields for _, fields in entries if fields.get("sessionId") == session_id
+        ]
+        assert len(matching) == 1
+        fields = matching[0]
         assert fields["requestedAt"].endswith("Z")
         assert set(fields) == {"sessionId", "requestedAt"}  # 포인터 — 전사 본문 없음
     finally:
@@ -78,6 +76,23 @@ def test_malformed_url_returns_false_instead_of_raising(monkeypatch):
     # 클라이언트 생성 실패(ValueError)도 재시도·식별 로그 경로를 타고 False로 끝난다
     monkeypatch.setenv(REDIS_URL_ENV, "not-a-url")
     assert asyncio.run(publish_report_request("123")) is False
+
+
+def test_client_creation_failure_retries_exactly_twice(monkeypatch):
+    import src.interview.report_request as report_request
+
+    monkeypatch.setenv(REDIS_URL_ENV, "not-a-url")
+    attempts = {"n": 0}
+
+    class _FailingFactory:
+        @staticmethod
+        def from_url(url, **kwargs):
+            attempts["n"] += 1
+            raise ValueError("malformed URL")
+
+    monkeypatch.setattr(report_request, "Redis", _FailingFactory)
+    assert asyncio.run(publish_report_request("123")) is False
+    assert attempts["n"] == 2  # 생성 실패도 재시도 계약(정확히 2회)을 따른다
 
 
 def test_first_failure_then_retry_succeeds(monkeypatch):
