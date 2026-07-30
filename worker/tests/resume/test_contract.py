@@ -12,7 +12,7 @@ import pytest
 
 from src.contract import AnalysisMode, AnalysisStatus, ParseRequest, StatusChanged
 
-EXAMPLES = Path(__file__).parent / "examples"
+EXAMPLES = Path(__file__).parent.parent / "examples"
 
 
 def _load(name: str) -> dict:

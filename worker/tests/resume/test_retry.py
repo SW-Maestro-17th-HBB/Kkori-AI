@@ -9,7 +9,7 @@ from src.storage.repository import get_parse_status
 from src.analysis.pipeline import process_request
 from src.contract.structured_data import StructuredData
 from tests.conftest import DIM, requires_postgres, seed_resume
-from tests.test_pipeline import SD, Recorder
+from tests.resume.test_pipeline import SD, Recorder
 
 pytestmark = requires_postgres
 

@@ -16,7 +16,7 @@ from src.report.pipeline import process_generation_request
 from src.report.reclaim import reclaim_pending_once
 from src.report.streams import publish_status
 from tests.conftest import requires_postgres, seed_session, seed_transcript
-from tests.test_report_pipeline import UTTERANCES
+from tests.report.test_pipeline import UTTERANCES
 
 
 def _redis_available() -> bool:

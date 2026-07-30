@@ -22,7 +22,7 @@ from src.report.evaluator import (
     validated_topic_result,
 )
 
-DOC = Path(__file__).parent.parent / "docs" / "requirements" / "report-evaluation" / "evaluation-criteria.md"
+DOC = Path(__file__).parent.parent.parent / "docs" / "requirements" / "report-evaluation" / "evaluation-criteria.md"
 
 
 def qa(n: int = 1, parent: int | None = None,

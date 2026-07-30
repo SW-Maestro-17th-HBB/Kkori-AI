@@ -18,7 +18,7 @@ import pytest
 from src.config import Settings
 
 LIVE = os.environ.get("KKORI_LIVE_BEDROCK") == "1"
-ENV_FILE = Path(__file__).parent.parent / ".env"  # worker/.env
+ENV_FILE = Path(__file__).parent.parent.parent / ".env"  # worker/.env
 
 pytestmark = pytest.mark.skipif(
     not LIVE, reason="실 Bedrock 호출 테스트 — KKORI_LIVE_BEDROCK=1 로만 실행(과금)"

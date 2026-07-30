@@ -19,7 +19,7 @@ from src.contract import (
     ReportGenerationRequested,
 )
 
-EXAMPLES = Path(__file__).parent / "examples"
+EXAMPLES = Path(__file__).parent.parent / "examples"
 
 
 def _load(name: str) -> dict:
