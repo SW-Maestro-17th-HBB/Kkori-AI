@@ -14,8 +14,15 @@ from src.interview.conversation_log import (
     QuestionType,
     Speaker,
 )
+from src.interview.end_state import EndCause, EndPhase
+from src.interview.interview_clock import InterviewClock
 from src.interview.orchestrator import Decision, DecisionSource
-from src.interview.prompts import FALLBACK_QUESTIONS
+from src.interview.prompts import (
+    CLOSING_STATEMENTS_GENERAL,
+    CLOSING_STATEMENTS_TIME_UP,
+    FALLBACK_QUESTIONS,
+    FINAL_QUESTIONS,
+)
 from src.interview.question_generation import GeneratedQuestion
 from src.interview.turn_pipeline import SpeechResult, TurnPipeline
 
@@ -26,17 +33,25 @@ _DEEPEN = Decision(
     action=Action.FOLLOW_UP, source=DecisionSource.ORCHESTRATOR,
     follow_up_type=FollowUpType.DEEPEN, reason="근거 설명이 없음",
 )
+_FINAL = Decision(
+    action=Action.FINAL_QUESTION, source=DecisionSource.ORCHESTRATOR, reason="주제가 소진됨"
+)
+_END = Decision(
+    action=Action.END, source=DecisionSource.ORCHESTRATOR, reason="시간이 소진됨"
+)
 
 
 class _OrchSpy:
     def __init__(self, decisions=(), gate=None, error=False):
         self.calls = 0
+        self.wrap_ups: list = []  # 턴별로 전달된 wrap_up_minutes 기록
         self._decisions = list(decisions)
         self._gate = gate
         self._error = error
 
-    async def __call__(self, log):
+    async def __call__(self, log, wrap_up_minutes=None):
         self.calls += 1
+        self.wrap_ups.append(wrap_up_minutes)
         if self._gate is not None:
             await self._gate.wait()
         if self._error:
@@ -100,7 +115,7 @@ def _make(**kwargs):
         orchestrator_fn=env.orch,
         generate_fn=env.gen,
         say_fn=env.say,
-        shutdown_fn=lambda: env.shutdowns.append(True),
+        shutdown_fn=lambda reason: env.shutdowns.append(reason),
         writer=env.writer,
         clock=lambda: NOW,
         **kwargs,
@@ -264,7 +279,7 @@ def test_tts_exhaustion_shuts_down_without_commit():
         await _drain(env.pipeline)
 
     asyncio.run(scenario())
-    assert env.shutdowns == [True]
+    assert env.shutdowns == ["tts playout failure"]
     assert env.log.last_question_number() == 2  # 미커밋 — 번호 미소모
     assert env.log.utterances[-1].speaker is Speaker.CANDIDATE
 
@@ -302,7 +317,7 @@ def test_say_exception_twice_shuts_down_without_commit():
         await _drain(env.pipeline)
 
     asyncio.run(scenario())
-    assert env.shutdowns == [True]  # 예외가 잡 종료 경로를 우회하지 않는다
+    assert env.shutdowns == ["tts playout failure"]  # 예외가 잡 종료 경로를 우회하지 않는다
     assert env.log.last_question_number() == 2  # 미커밋·번호 미소모
 
 
@@ -382,3 +397,448 @@ def test_aclose_is_idempotent_and_blocks_new_turns():
     asyncio.run(scenario())
     assert env.writer.closed
     assert env.log.utterances[-1].speaker is Speaker.INTERVIEWER  # 종료 후 답변 미적재
+
+
+# --- 종료 국면 (docs/prd/interview-end.md §1·§2) ---
+
+class _CleanupSpy:
+    """cleanup_fn 스텁 — 클로징 재생 이후(CLEANING)에 호출된다."""
+
+    def __init__(self):
+        self.causes: list[EndCause] = []
+
+    async def __call__(self, cause):
+        self.causes.append(cause)
+
+
+def _enter_waiting(env) -> int:
+    """정상 경로(마지막 질문 커밋 후)로 WAITING_FINAL_ANSWER에 진입시킨다."""
+    number = env.log.last_question_number() + 1
+    env.log.append_question(
+        question_number=number,
+        parent_question_number=number,
+        question_type=QuestionType.FINAL,
+        content=FINAL_QUESTIONS[0],
+        spoken_at=SPOKE_AT,
+    )
+    env.pipeline.end_state.try_advance(EndPhase.WAITING_FINAL_ANSWER)
+    return number
+
+
+def test_waiting_final_answer_commits_exactly_once_then_closes():
+    cleanup = _CleanupSpy()
+    env = _make(cleanup_fn=cleanup)
+
+    async def scenario():
+        await _bootstrap(env)
+        number = _enter_waiting(env)
+        env.pipeline.on_user_turn_completed("마지막으로 한마디 드리겠습니다.")
+        await _drain(env.pipeline)
+        env.pipeline.on_user_turn_completed("클로징 이후 추가 발화입니다.")
+        await _drain(env.pipeline)
+        return number
+
+    final_number = asyncio.run(scenario())
+    answers = [u for u in env.log.utterances if u.speaker is Speaker.CANDIDATE]
+    assert answers[-1].content == "마지막으로 한마디 드리겠습니다."  # 1회만 커밋
+    assert answers[-1].question_number == final_number  # 마지막 답변이 final 번호 승계
+    closing = env.log.utterances[-1]
+    assert closing.question_type is QuestionType.CLOSING
+    assert closing.question_number is None  # 인사는 번호 없음
+    assert closing.content in CLOSING_STATEMENTS_GENERAL  # FINAL_QUESTION 경유 = 일반형
+    assert cleanup.causes == [EndCause.FINAL_QUESTION]
+    assert env.pipeline.end_state.phase is EndPhase.CLEANING
+
+
+def test_direct_closing_path_does_not_commit_later_turns():
+    cleanup = _CleanupSpy()
+    env = _make(cleanup_fn=cleanup)
+
+    async def scenario():
+        await _bootstrap(env)
+        assert env.pipeline.begin_closing(EndCause.USER_REQUEST) is True
+        env.pipeline.on_user_turn_completed("종료 요청 이후 발화입니다.")
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    # 전이 이후 turn은 커밋되지 않고, 마지막 발화는 클로징 인사다 (일반형)
+    assert all(u.content != "종료 요청 이후 발화입니다." for u in env.log.utterances)
+    assert env.log.utterances[-1].question_type is QuestionType.CLOSING
+    assert env.log.utterances[-1].content in CLOSING_STATEMENTS_GENERAL
+    assert cleanup.causes == [EndCause.USER_REQUEST]
+
+
+def test_hard_promotion_beats_final_answer_and_transcript_matches_winner():
+    cleanup = _CleanupSpy()
+    env = _make(cleanup_fn=cleanup)
+
+    async def scenario():
+        await _bootstrap(env)
+        _enter_waiting(env)
+        # hard가 마지막 답변 대기를 CLOSING으로 승격 — 이후 도착한 답변은 폐기
+        assert env.pipeline.begin_closing(EndCause.HARD_TIMEOUT) is True
+        env.pipeline.on_user_turn_completed("뒤늦게 도착한 마지막 답변입니다.")
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    assert all(
+        u.content != "뒤늦게 도착한 마지막 답변입니다." for u in env.log.utterances
+    )  # transcript가 전이 승자와 일치 — 답변 없음
+    assert env.log.utterances[-1].content in CLOSING_STATEMENTS_TIME_UP  # hard = 시간 소진형
+    assert cleanup.causes == [EndCause.HARD_TIMEOUT]
+    assert env.pipeline.end_state.cause is EndCause.HARD_TIMEOUT
+
+
+def test_begin_closing_is_first_wins_with_single_closing_run():
+    cleanup = _CleanupSpy()
+    env = _make(cleanup_fn=cleanup)
+
+    async def scenario():
+        await _bootstrap(env)
+        assert env.pipeline.begin_closing(EndCause.USER_REQUEST) is True
+        assert env.pipeline.begin_closing(EndCause.HARD_TIMEOUT) is False
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    assert cleanup.causes == [EndCause.USER_REQUEST]  # 부수효과 정확히 1회
+    closings = [u for u in env.log.utterances if u.question_type is QuestionType.CLOSING]
+    assert len(closings) == 1  # 클로징 인사도 1회만
+
+
+def test_leaving_running_discards_inflight_generation():
+    gate = asyncio.Event()
+    cleanup = _CleanupSpy()
+    env = _make(orch=_OrchSpy(gate=gate), cleanup_fn=cleanup)
+
+    async def scenario():
+        await _bootstrap(env)
+        env.pipeline.on_user_turn_completed("본론 답변입니다.")
+        await asyncio.sleep(0)  # 파이프라인이 게이트에서 블록될 때까지 양보
+        env.pipeline.begin_closing(EndCause.USER_REQUEST)
+        gate.set()
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    # 답변은 RUNNING에서 이미 커밋됐고, 진행 중이던 질문 생성 결과는 폐기됐다
+    numbered_questions = [
+        u
+        for u in env.log.utterances
+        if u.speaker is Speaker.INTERVIEWER and u.question_number is not None
+    ]
+    assert len(numbered_questions) == 2  # 초기 + 첫 전환 — 새 질문 없음
+    assert cleanup.causes == [EndCause.USER_REQUEST]
+
+
+def test_closing_waits_for_inflight_playout_before_running():
+    say_gate = asyncio.Event()
+    cleanup = _CleanupSpy()
+
+    class _BlockingSay:
+        def __init__(self):
+            self.calls: list[str] = []
+
+        async def __call__(self, text):
+            self.calls.append(text)
+            if len(self.calls) == 3:  # 본론 질문 재생만 게이트에서 블록
+                await say_gate.wait()
+            return SpeechResult(ok=True, started_at=SPOKE_AT)
+
+    env = _make(say=_BlockingSay(), cleanup_fn=cleanup)
+
+    async def scenario():
+        await _bootstrap(env)
+        env.pipeline.on_user_turn_completed("본론 답변입니다.")
+        for _ in range(10):  # 질문 재생(say)이 블록될 때까지 양보
+            await asyncio.sleep(0)
+        env.pipeline.begin_closing(EndCause.HARD_TIMEOUT)
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert cleanup.causes == []  # 재생 완료 전에는 클로징이 시작되지 않는다
+        say_gate.set()
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    assert cleanup.causes == [EndCause.HARD_TIMEOUT]
+    # 재생이 완료된 질문은 실제로 들었으므로 커밋되고, 클로징이 그 뒤를 잇는다
+    assert env.log.utterances[-2].speaker is Speaker.INTERVIEWER
+    assert env.log.utterances[-2].question_number == 3
+    assert env.log.utterances[-1].question_type is QuestionType.CLOSING
+
+
+def test_cleanup_exception_falls_back_to_shutdown():
+    class _FailingCleanup:
+        async def __call__(self, cause):
+            raise RuntimeError("cleanup boom")
+
+    env = _make(cleanup_fn=_FailingCleanup())
+
+    async def scenario():
+        await _bootstrap(env)
+        env.pipeline.begin_closing(EndCause.USER_REQUEST)
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    # 방치 금지 — 최후 fallback은 잡 종료, reason이 TTS 장애로 오기록되지 않는다
+    assert env.shutdowns == ["cleanup failure"]
+
+
+def test_time_guard_forces_hard_closing_when_deadline_passed():
+    cleanup = _CleanupSpy()
+    now = {"t": 0.0}
+    clock = InterviewClock(
+        duration_seconds=1800,
+        wrap_up_remaining_seconds=300,
+        hard_grace_seconds=180,
+        monotonic=lambda: now["t"],
+    )
+    clock.start()
+    env = _make(cleanup_fn=cleanup, interview_clock=clock)
+
+    async def scenario():
+        await _bootstrap(env)
+        now["t"] = 2000.0  # 예정 종료(1800) + 유예(180) 초과
+        env.pipeline.start_time_guard()
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    assert cleanup.causes == [EndCause.HARD_TIMEOUT]
+    assert env.log.utterances[-1].content in CLOSING_STATEMENTS_TIME_UP
+    assert env.pipeline.end_state.phase is EndPhase.CLEANING
+
+
+# --- 마무리 판단·마지막 질문·클로징 (docs/prd/interview-end.md §2) ---
+
+def test_end_decision_speaks_time_up_closing_with_reason():
+    cleanup = _CleanupSpy()
+    env = _make(orch=_OrchSpy(decisions=(_END,)), cleanup_fn=cleanup)
+
+    async def scenario():
+        await _bootstrap(env)
+        env.pipeline.on_user_turn_completed("본론 답변입니다.")
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    closing = env.log.utterances[-1]
+    assert closing.question_type is QuestionType.CLOSING
+    assert closing.content in CLOSING_STATEMENTS_TIME_UP  # END 판단 = 시간 소진형
+    assert closing.reason == "시간이 소진됨"  # Orchestrator 판단 경로 — reason 기록
+    assert cleanup.causes == [EndCause.LLM_END]
+
+
+def test_final_question_decision_speaks_final_waits_then_closes():
+    cleanup = _CleanupSpy()
+    env = _make(orch=_OrchSpy(decisions=(_FINAL,)), cleanup_fn=cleanup)
+
+    async def scenario():
+        await _bootstrap(env)
+        env.pipeline.on_user_turn_completed("본론 답변입니다.")
+        await _drain(env.pipeline)
+        # playout 성공·커밋 이후에만 마지막 답변 대기로 전이한다 (전이 트리거 계약)
+        assert env.pipeline.end_state.phase is EndPhase.WAITING_FINAL_ANSWER
+        env.pipeline.on_user_turn_completed("마지막 한마디입니다.")
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    final = env.log.question_for(3)
+    assert final.question_type is QuestionType.FINAL
+    assert final.parent_question_number == 3  # parent=self 루트
+    assert final.content in FINAL_QUESTIONS  # 검수 목록 원문
+    assert final.reason == "주제가 소진됨"  # Orchestrator 판단 경로 — reason 기록
+    answers = [u for u in env.log.utterances if u.speaker is Speaker.CANDIDATE]
+    assert answers[-1].question_number == 3  # 마지막 답변이 final 질문 번호 승계
+    assert env.log.utterances[-1].content in CLOSING_STATEMENTS_GENERAL
+    assert cleanup.causes == [EndCause.FINAL_QUESTION]
+
+
+def test_final_question_tts_exhaustion_closes_without_commit():
+    cleanup = _CleanupSpy()
+    env = _make(
+        orch=_OrchSpy(decisions=(_FINAL,)),
+        say=_SaySpy(results=(
+            SpeechResult(ok=True, started_at=SPOKE_AT),  # 초기 발화
+            SpeechResult(ok=True, started_at=SPOKE_AT),  # 첫 전환 질문
+            SpeechResult(ok=False),  # 마지막 질문 1차 실패
+            SpeechResult(ok=False),  # 재시도 실패
+        )),
+        cleanup_fn=cleanup,
+    )
+
+    async def scenario():
+        await _bootstrap(env)
+        env.pipeline.on_user_turn_completed("본론 답변입니다.")
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    assert all(u.question_type is not QuestionType.FINAL for u in env.log.utterances)
+    assert env.log.utterances[-1].content in CLOSING_STATEMENTS_GENERAL  # 일반형 문구
+    assert cleanup.causes == [EndCause.FINAL_QUESTION]
+    assert not env.shutdowns  # 잡 종료가 아니라 클로징으로 진행
+
+
+def test_closing_tts_exhaustion_still_runs_cleanup():
+    cleanup = _CleanupSpy()
+    env = _make(
+        say=_SaySpy(results=(
+            SpeechResult(ok=True, started_at=SPOKE_AT),
+            SpeechResult(ok=True, started_at=SPOKE_AT),
+            SpeechResult(ok=False),  # 클로징 1차 실패
+            SpeechResult(ok=False),  # 재시도 실패
+        )),
+        cleanup_fn=cleanup,
+    )
+
+    async def scenario():
+        await _bootstrap(env)
+        env.pipeline.begin_closing(EndCause.USER_REQUEST)
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    # 재생 안 된 클로징은 커밋하지 않고, 종료 시퀀스는 계속된다
+    assert all(u.question_type is not QuestionType.CLOSING for u in env.log.utterances)
+    assert cleanup.causes == [EndCause.USER_REQUEST]
+    assert not env.shutdowns
+
+
+def test_wrap_up_minutes_injected_at_turn_boundary():
+    now = {"t": 0.0}
+    clock = InterviewClock(
+        duration_seconds=1800,
+        wrap_up_remaining_seconds=300,
+        hard_grace_seconds=180,
+        monotonic=lambda: now["t"],
+    )
+    clock.start()
+    env = _make(interview_clock=clock)
+
+    async def scenario():
+        await _bootstrap(env)  # 첫 답변은 코드 강제 — Orchestrator 미호출
+        env.pipeline.on_user_turn_completed("본론 답변입니다.")  # 비마무리 단계
+        await _drain(env.pipeline)
+        now["t"] = 1560.0  # 남은 240초 = 약 4분 — 마무리 단계 진입
+        env.pipeline.on_user_turn_completed("추가 답변입니다.")
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    assert env.orch.wrap_ups == [None, 4]  # 임계치 이후 턴부터만 남은 시간 주입
+
+
+def test_wrap_up_cap_forces_final_question_without_orchestrator():
+    cleanup = _CleanupSpy()
+    now = {"t": 0.0}
+    clock = InterviewClock(
+        duration_seconds=1800,
+        wrap_up_remaining_seconds=300,
+        hard_grace_seconds=180,
+        monotonic=lambda: now["t"],
+    )
+    clock.start()
+    env = _make(interview_clock=clock, max_followups_per_branch=0, cleanup_fn=cleanup)
+
+    async def scenario():
+        await _bootstrap(env)
+        now["t"] = 1560.0  # 마무리 단계
+        env.pipeline.on_user_turn_completed("본론 답변입니다.")
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    assert env.orch.calls == 0  # 상한 강제 — Orchestrator 미호출
+    final = env.log.utterances[-1]
+    assert final.question_type is QuestionType.FINAL  # NEXT_TOPIC 대신 FINAL_QUESTION
+    assert final.reason is None  # 코드 강제 경로 — reason 없음
+    assert env.pipeline.end_state.phase is EndPhase.WAITING_FINAL_ANSWER
+
+
+def test_first_answer_completed_in_wrap_up_forces_final_question():
+    cleanup = _CleanupSpy()
+    now = {"t": 0.0}
+    clock = InterviewClock(
+        duration_seconds=1800,
+        wrap_up_remaining_seconds=300,
+        hard_grace_seconds=180,
+        monotonic=lambda: now["t"],
+    )
+    clock.start()
+    env = _make(interview_clock=clock, cleanup_fn=cleanup)
+
+    async def scenario():
+        await env.pipeline.speak_initial("안녕하세요, 자기소개 부탁드립니다.")
+        now["t"] = 1560.0  # 첫 답변이 길어져 마무리 단계에서야 완료된 엣지
+        env.pipeline.on_user_turn_completed("아주 길었던 자기소개입니다.")
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    assert env.orch.calls == 0  # 첫 답변은 여전히 Orchestrator 미호출
+    final = env.log.utterances[-1]
+    assert final.question_type is QuestionType.FINAL  # 마무리 단계에 새 주제 없음
+    assert env.pipeline.end_state.phase is EndPhase.WAITING_FINAL_ANSWER
+
+
+def test_early_end_before_initial_question_suppresses_it():
+    cleanup = _CleanupSpy()
+    env = _make(cleanup_fn=cleanup)
+
+    async def scenario():
+        # 초기화 중 보류됐던 종료 신호가 초기 발화보다 먼저 클로징을 시작한 경우
+        env.pipeline.begin_closing(EndCause.USER_REQUEST)
+        await env.pipeline.speak_initial("안녕하세요, 자기소개 부탁드립니다.")
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    # 초기 질문은 stale 검사로 폐기되고, 클로징만 발화·커밋된다
+    assert [u.question_type for u in env.log.utterances] == [QuestionType.CLOSING]
+    assert cleanup.causes == [EndCause.USER_REQUEST]
+
+
+def test_marker_recorded_exactly_once_on_closing_entry():
+    markers: list[EndCause] = []
+
+    async def marker(cause):
+        markers.append(cause)
+
+    cleanup = _CleanupSpy()
+    env = _make(cleanup_fn=cleanup, marker_fn=marker)
+
+    async def scenario():
+        await _bootstrap(env)
+        env.pipeline.begin_closing(EndCause.USER_REQUEST)
+        env.pipeline.begin_closing(EndCause.HARD_TIMEOUT)  # 패자 — 부수효과 없음
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    assert markers == [EndCause.USER_REQUEST]
+
+
+def test_marker_failure_does_not_block_closing():
+    async def marker(cause):
+        raise RuntimeError("marker boom")
+
+    cleanup = _CleanupSpy()
+    env = _make(cleanup_fn=cleanup, marker_fn=marker)
+
+    async def scenario():
+        await _bootstrap(env)
+        env.pipeline.begin_closing(EndCause.USER_REQUEST)
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    assert env.log.utterances[-1].question_type is QuestionType.CLOSING  # 클로징 계속
+    assert cleanup.causes == [EndCause.USER_REQUEST]
+
+
+def test_waiting_without_final_question_is_defended():
+    cleanup = _CleanupSpy()
+    env = _make(cleanup_fn=cleanup)
+
+    async def scenario():
+        await _bootstrap(env)
+        # 전이 트리거 계약 위반 상태 — 마지막 질문(final) 없이 WAITING 진입
+        env.pipeline.end_state.try_advance(EndPhase.WAITING_FINAL_ANSWER)
+        env.pipeline.on_user_turn_completed("이 발화는 마지막 답변이 아닙니다.")
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    # 이전 질문의 답변으로 오귀속하지 않고 폐기한다 — hard 안전망이 수렴
+    assert all(
+        u.content != "이 발화는 마지막 답변이 아닙니다." for u in env.log.utterances
+    )
+    assert cleanup.causes == []

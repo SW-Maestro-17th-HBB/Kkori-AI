@@ -40,6 +40,21 @@ class OrchestratorDecision(BaseModel):
     refQuestionNumber: int | None = None
 
 
+class WrapUpOrchestratorDecision(BaseModel):
+    """마무리 단계 응답 스키마 — NEXT_TOPIC이 빠지고 FINAL_QUESTION·END가 들어간다.
+
+    액션 집합은 스키마가 강제한다(docs/prd/interview-end.md §2) — 비허용 액션은
+    검증 실패로 폴백에 수렴하므로 별도 강등 로직이 필요 없다.
+    """
+
+    reason: str
+    action: Literal["FOLLOW_UP", "FINAL_QUESTION", "END"]
+    followUpType: (
+        Literal["DEEPEN", "CONCRETE", "VERIFY", "BOUNDARY", "CONSISTENCY"] | None
+    ) = None
+    refQuestionNumber: int | None = None
+
+
 class DecisionSource(StrEnum):
     ORCHESTRATOR = "orchestrator"
     FORCED = "forced"  # 코드 강제 (첫 답변·상한)
@@ -65,9 +80,37 @@ def fallback_next_topic() -> Decision:
     return Decision(action=Action.NEXT_TOPIC, source=DecisionSource.FALLBACK)
 
 
-async def decide(llm: agents_llm.LLM, log: ConversationLog) -> Decision:
-    """직전 답변을 평가해 다음 액션을 결정한다. 실패 시 NEXT_TOPIC 폴백."""
-    reserve = estimate_tokens(orchestrator_instructions("")) + _OUTPUT_RESERVE_TOKENS
+def forced_final_question() -> Decision:
+    """마무리 단계의 코드 강제 — 상한 도달·주입 경계 예외가 수렴한다."""
+    return Decision(action=Action.FINAL_QUESTION, source=DecisionSource.FORCED)
+
+
+def fallback_final_question() -> Decision:
+    """마무리 단계의 폴백 — 마지막 질문은 직전 답변 평가에 의존하지 않아 항상 안전하다."""
+    return Decision(action=Action.FINAL_QUESTION, source=DecisionSource.FALLBACK)
+
+
+async def decide(
+    llm: agents_llm.LLM,
+    log: ConversationLog,
+    *,
+    wrap_up_remaining_minutes: int | None = None,
+) -> Decision:
+    """직전 답변을 평가해 다음 액션을 결정한다.
+
+    비마무리 단계 실패는 NEXT_TOPIC, 마무리 단계(wrap_up_remaining_minutes 존재)
+    실패는 FINAL_QUESTION으로 폴백한다 — 각 단계에서 평가 불요·항상 안전한 방향.
+    """
+    wrap_up = wrap_up_remaining_minutes is not None
+    schema = WrapUpOrchestratorDecision if wrap_up else OrchestratorDecision
+    fallback = fallback_final_question if wrap_up else fallback_next_topic
+    fallback_label = "FINAL_QUESTION" if wrap_up else "NEXT_TOPIC"
+    reserve = (
+        estimate_tokens(
+            orchestrator_instructions("", wrap_up_remaining_minutes=wrap_up_remaining_minutes)
+        )
+        + _OUTPUT_RESERVE_TOKENS
+    )
     conversation = orchestrator_context(
         log,
         token_budget=max(ORCHESTRATOR_INPUT_TOKEN_BUDGET - reserve, 1),
@@ -75,24 +118,29 @@ async def decide(llm: agents_llm.LLM, log: ConversationLog) -> Decision:
     )
     try:
         chat_ctx = agents_llm.ChatContext.empty()
-        chat_ctx.add_message(role="user", content=orchestrator_instructions(conversation))
-        text = await collect_chat_text(
-            llm, chat_ctx, response_format=OrchestratorDecision
+        chat_ctx.add_message(
+            role="user",
+            content=orchestrator_instructions(
+                conversation, wrap_up_remaining_minutes=wrap_up_remaining_minutes
+            ),
         )
-        parsed = OrchestratorDecision.model_validate_json(text)
+        text = await collect_chat_text(llm, chat_ctx, response_format=schema)
+        parsed = schema.model_validate_json(text)
     except Exception as exc:
         # 예외 객체를 기록하지 않는다 — ValidationError의 input_value 등에
         # 답변 원문·개인정보가 그대로 담길 수 있다 (타입명만)
         logger.warning(
-            "Orchestrator 호출·구조화 파싱 실패(%s) — NEXT_TOPIC 폴백", type(exc).__name__
+            "Orchestrator 호출·구조화 파싱 실패(%s) — %s 폴백",
+            type(exc).__name__,
+            fallback_label,
         )
-        return fallback_next_topic()
+        return fallback()
 
     reason = parsed.reason.strip()
     if not reason:
         # "한 문장 판단 근거" 계약 위반 — reason 불변식을 지키기 위해 판단 자체를 폐기
-        logger.warning("Orchestrator reason이 비어 있음 — NEXT_TOPIC 폴백")
-        return fallback_next_topic()
+        logger.warning("Orchestrator reason이 비어 있음 — %s 폴백", fallback_label)
+        return fallback()
 
     if parsed.action == "NEXT_TOPIC":
         return Decision(
@@ -101,9 +149,23 @@ async def decide(llm: agents_llm.LLM, log: ConversationLog) -> Decision:
             reason=reason,
         )
 
+    if parsed.action == "FINAL_QUESTION":
+        return Decision(
+            action=Action.FINAL_QUESTION,
+            source=DecisionSource.ORCHESTRATOR,
+            reason=reason,
+        )
+
+    if parsed.action == "END":
+        return Decision(
+            action=Action.END,
+            source=DecisionSource.ORCHESTRATOR,
+            reason=reason,
+        )
+
     if parsed.followUpType is None:
-        logger.warning("FOLLOW_UP인데 followUpType 없음 — NEXT_TOPIC 폴백")
-        return fallback_next_topic()
+        logger.warning("FOLLOW_UP인데 followUpType 없음 — %s 폴백", fallback_label)
+        return fallback()
 
     follow_up_type = FollowUpType(parsed.followUpType)
     ref = parsed.refQuestionNumber
