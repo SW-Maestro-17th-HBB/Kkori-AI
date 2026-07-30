@@ -1,11 +1,12 @@
 """리포트 생성 요청 발행 — flush 성공 후 Redis Stream XADD. docs/prd/interview-end.md §5.
 
-메시지는 포인터다 — 전사 본문을 넣지 않고, worker가 sessionId로 DB의 transcript를
-읽는다. 재시도로 같은 세션의 메시지가 중복 발행될 수 있으므로 소비 측(worker)이
-sessionId 기준으로 멱등 처리한다는 것이 계약이다. 발행이 끝내 실패해도 transcript는
-DB에 있다 — "transcript 행 존재 & 리포트 없음"이 미발행 검출식이고, 감지·재발행은
-리포트 생성 스토리(worker)의 완료 조건으로 이관돼 있다. sessionId는 개인정보가
-아니므로 로그 기록 가능하다.
+메시지는 포인터다 — `session_id` 단일 필드만 담고(worker 합의 스키마), worker가
+DB의 transcript를 읽는다. 발행 시각은 별도 필드 없이 스트림 entry ID
+(`<밀리초>-<시퀀스>`)에 내장돼 있다. 재시도로 같은 세션의 메시지가 중복 발행될 수
+있으므로 소비 측(worker)이 session_id 기준으로 멱등 처리한다는 것이 계약이다.
+발행이 끝내 실패해도 transcript는 DB에 있다 — "transcript 행 존재 & 리포트 없음"이
+미발행 검출식이고, 감지·재발행은 리포트 생성 스토리(worker)의 완료 조건으로
+이관돼 있다. sessionId는 개인정보가 아니므로 로그 기록 가능하다.
 """
 
 from __future__ import annotations
@@ -13,7 +14,6 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import suppress
-from datetime import datetime, timezone
 
 from redis.asyncio import Redis
 
@@ -32,12 +32,7 @@ async def publish_report_request(session_id: str) -> bool:
     if not url:
         logger.warning("%s 미설정 — 리포트 요청 발행 생략", REDIS_URL_ENV)
         return False
-    fields = {
-        "sessionId": session_id,
-        "requestedAt": datetime.now(timezone.utc)
-        .isoformat(timespec="seconds")
-        .replace("+00:00", "Z"),
-    }
+    fields = {"session_id": session_id}
     for attempt in range(1, _PUBLISH_ATTEMPTS + 1):
         redis: Redis | None = None
         try:

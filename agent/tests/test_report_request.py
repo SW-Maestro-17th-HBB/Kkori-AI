@@ -36,15 +36,14 @@ def test_publish_appends_pointer_message_to_stream(monkeypatch):
         assert asyncio.run(publish_report_request(session_id)) is True
 
         # 마지막 항목이 이 테스트의 메시지라고 가정하지 않는다 —
-        # 병렬 테스트·외부 발행과 무관하게 sessionId로 찾는다
+        # 병렬 테스트·외부 발행과 무관하게 session_id로 찾는다
         entries = client.xrange(REPORT_REQUEST_STREAM_KEY)
         matching = [
-            fields for _, fields in entries if fields.get("sessionId") == session_id
+            fields for _, fields in entries if fields.get("session_id") == session_id
         ]
         assert len(matching) == 1
-        fields = matching[0]
-        assert fields["requestedAt"].endswith("Z")
-        assert set(fields) == {"sessionId", "requestedAt"}  # 포인터 — 전사 본문 없음
+        # 포인터 — session_id 단일 필드 (발행 시각은 entry ID에 내장, worker 합의 스키마)
+        assert set(matching[0]) == {"session_id"}
     finally:
         client.close()
 
@@ -61,7 +60,7 @@ def test_duplicate_publish_appends_again_consumer_dedupes(monkeypatch):
         assert asyncio.run(publish_report_request(session_id)) is True
         assert asyncio.run(publish_report_request(session_id)) is True
         entries = client.xrange(REPORT_REQUEST_STREAM_KEY)
-        matching = [e for e in entries if e[1].get("sessionId") == session_id]
+        matching = [e for e in entries if e[1].get("session_id") == session_id]
         assert len(matching) == 2
     finally:
         client.close()
