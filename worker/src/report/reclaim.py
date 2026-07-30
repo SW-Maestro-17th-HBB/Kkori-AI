@@ -15,7 +15,7 @@ from redis.asyncio import Redis
 
 from src.config import Settings
 from src.contract import ReportGenerationRequested
-from src.messaging.streams import decode_fields  # 계약 무관 순수 변환 — 재사용
+from src.contract.fields import decode_fields
 from src.report.streams import get_delivery_count
 
 logger = logging.getLogger(__name__)
