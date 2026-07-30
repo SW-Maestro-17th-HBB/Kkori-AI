@@ -44,6 +44,9 @@ TEXT_WEAKNESS_TAGS: tuple[str, ...] = (
 )
 MAX_TAGS_PER_ANSWER = 3  # 문서 §2 — 답변당 0~3개
 MAX_TASKS_PER_ANSWER = 2  # 문서 §4 — 답변당 0~2개
+# 과제 제목 길이: 문서 §4 의 25자는 프롬프트로 지시하는 권고고, 여기 상한은 UI 를 깨는
+# 극단값만 거르는 안전선이다 — 잘라내면 문장이 깨지므로 초과 과제는 통째로 버린다(관대 처리).
+MAX_TASK_TITLE_LEN = 50
 
 
 class AnswerEvaluation(BaseModel):
@@ -111,7 +114,11 @@ def sanitize_evaluation(evaluation: AnswerEvaluation) -> AnswerEvaluation:
     if dropped:
         logger.warning("어휘집 밖 약점 태그 제거: %s", dropped)
     tags = tags[:MAX_TAGS_PER_ANSWER]
-    tasks = evaluation.improvementTasks[:MAX_TASKS_PER_ANSWER] if tags else []
+    tasks = evaluation.improvementTasks if tags else []
+    long_titles = [t.title for t in tasks if len(t.title) > MAX_TASK_TITLE_LEN]
+    if long_titles:
+        logger.warning("제목이 안전선을 넘는 개선 과제 제거: %s", long_titles)
+    tasks = [t for t in tasks if len(t.title) <= MAX_TASK_TITLE_LEN][:MAX_TASKS_PER_ANSWER]
     return evaluation.model_copy(update={"weaknessTags": tags, "improvementTasks": tasks})
 
 

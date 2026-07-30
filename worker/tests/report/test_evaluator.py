@@ -117,6 +117,15 @@ def test_개선과제_2개_초과는_잘라낸다():
     assert len(result.improvementTasks) == 2
 
 
+def test_제목이_안전선을_넘는_개선과제는_버린다():
+    tasks = [
+        ImprovementTask(title="결론부터 말하기", description="설명"),
+        ImprovementTask(title="가" * 51, description="설명"),  # 50자 안전선 초과
+    ]
+    result = sanitize_evaluation(evaluation(improvementTasks=tasks))
+    assert [t.title for t in result.improvementTasks] == ["결론부터 말하기"]
+
+
 # ---------------------------------------------------------------- 주제 호출 결과 검증 (번호 대조)
 
 def test_평가가_누락되면_오류다():
