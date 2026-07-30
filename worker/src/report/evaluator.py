@@ -117,7 +117,9 @@ def sanitize_evaluation(evaluation: AnswerEvaluation) -> AnswerEvaluation:
     tasks = evaluation.improvementTasks if tags else []
     long_titles = [t.title for t in tasks if len(t.title) > MAX_TASK_TITLE_LEN]
     if long_titles:
-        logger.warning("제목이 안전선을 넘는 개선 과제 제거: %s", long_titles)
+        # 제목 원문은 로그에 남기지 않는다 — 답변에서 파생된 자유 텍스트라 개인정보가
+        # 섞일 수 있다(레포 로그 규칙). 원문 확인이 필요하면 저장된 평가로 추적한다.
+        logger.warning("제목 길이 초과 개선 과제 %d개 제거", len(long_titles))
     tasks = [t for t in tasks if len(t.title) <= MAX_TASK_TITLE_LEN][:MAX_TASKS_PER_ANSWER]
     return evaluation.model_copy(update={"weaknessTags": tags, "improvementTasks": tasks})
 

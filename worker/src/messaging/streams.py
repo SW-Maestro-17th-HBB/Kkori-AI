@@ -13,7 +13,7 @@ from redis.asyncio import Redis
 from src.contract import AnalysisStatus, ParseRequest, StatusChanged
 from src.contract.fields import decode_fields  # 공용 계층으로 이동 — 재노출 (기존 호출부 호환)
 
-__all__ = ["publish_status", "get_delivery_count", "decode_fields"]
+__all__ = ["decode_fields", "get_delivery_count", "publish_status"]
 
 
 async def publish_status(
