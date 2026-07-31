@@ -100,7 +100,9 @@ async def process_generation_request(
             return
         # 2b. 텍스트는 끝났고 완성 판정 직전에 죽은 재전달 → 평가 없이 판정만 재시도
         if report["text_analyzed_at"] is not None:
-            if await try_complete(conn, report["id"]):
+            if await try_complete(
+                conn, report["id"], require_audio=settings.audio_analysis_enabled
+            ):
                 await publish(report["id"], uid, ReportStatus.COMPLETED, "")
             return
 
@@ -169,8 +171,9 @@ async def process_generation_request(
         tag_summary=aggregate_tag_summary(evaluated),
     )
 
-    # 9. 완성 판정 — 음성도 끝나 있으면 나중에 끝난 이쪽이 COMPLETED 를 확정한다
-    if await try_complete(conn, report_id):
+    # 9. 완성 판정. 음성 분석 경로가 켜져 있으면 둘 다 끝났을 때만(나중에 끝난 쪽이 확정),
+    #    꺼져 있으면(도입 전) 텍스트만으로 즉시 완성한다 — 전달력 빈 값, overall 은 3축 평균.
+    if await try_complete(conn, report_id, require_audio=settings.audio_analysis_enabled):
         await publish(report_id, uid, ReportStatus.COMPLETED, "")
 
 

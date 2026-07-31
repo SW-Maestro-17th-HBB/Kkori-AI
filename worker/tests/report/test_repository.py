@@ -220,6 +220,26 @@ async def test_완성판정_overall은_평가된_축의_평균(conn, delivery_sc
 
 
 @pytest.mark.asyncio
+async def test_완성판정_음성_불요_모드는_텍스트만으로_완성한다(conn):
+    """require_audio=False (음성 분석 경로 도입 전) — 음성 시각 없이도 COMPLETED."""
+    session_id, resume_id = await seed_session(conn)
+    report_id = await create(conn, session_id, resume_id)
+    await repo.try_transition(conn, report_id, ReportStatus.PENDING, ReportStatus.PROCESSING)
+    await repo.save_text_results(
+        conn, report_id, scores=SCORES, feedbacks=[feedback(1)], summary="총평", tag_summary=TAGS,
+    )
+
+    assert await repo.try_complete(conn, report_id, require_audio=False)
+    cur = await conn.execute(
+        "SELECT status, overall_score, delivery_score FROM reports WHERE id = %s", (report_id,)
+    )
+    row = await cur.fetchone()
+    assert row["status"] == "COMPLETED"
+    assert row["overall_score"] == 80  # 텍스트 3축 평균 (80+75+85)/3
+    assert row["delivery_score"] is None  # 전달력은 빈 값 유지
+
+
+@pytest.mark.asyncio
 async def test_실패기록은_종결상태를_덮어쓰지_않는다(conn):
     session_id, resume_id = await seed_session(conn)
     report_id = await create(conn, session_id, resume_id)
