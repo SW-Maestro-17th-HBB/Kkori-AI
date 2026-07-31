@@ -14,7 +14,7 @@ from src.contract import AnalysisStatus, ParseRequest
 from src.storage.repository import count_chunks, get_parse_status
 from src.contract.structured_data import StructuredData
 from tests.conftest import DIM, requires_postgres, seed_resume
-from tests.test_pipeline import SD
+from tests.resume.test_pipeline import SD
 
 
 def _redis_available() -> bool:

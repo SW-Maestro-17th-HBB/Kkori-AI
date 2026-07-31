@@ -11,6 +11,9 @@ from __future__ import annotations
 from redis.asyncio import Redis
 
 from src.contract import AnalysisStatus, ParseRequest, StatusChanged
+from src.contract.fields import decode_fields  # 공용 계층으로 이동 — 재노출 (기존 호출부 호환)
+
+__all__ = ["decode_fields", "get_delivery_count", "publish_status"]
 
 
 async def publish_status(
@@ -36,13 +39,3 @@ async def get_delivery_count(redis: Redis, group: str, message_id: str) -> int:
         ParseRequest.STREAM_KEY, group, min=message_id, max=message_id, count=1
     )
     return entries[0]["times_delivered"] if entries else 1
-
-
-def decode_fields(fields: dict) -> dict[str, str]:
-    """Redis 가 주는 bytes 필드맵을 계약 모델이 기대하는 str 맵으로."""
-    return {
-        (k.decode() if isinstance(k, bytes) else k): (
-            v.decode() if isinstance(v, bytes) else v
-        )
-        for k, v in fields.items()
-    }
