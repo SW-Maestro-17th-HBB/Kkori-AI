@@ -23,9 +23,9 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
-from livekit.agents import inference
-
 from src.config import (
+    BEDROCK_INTERVIEW_LLM_MODEL,
+    BEDROCK_ORCHESTRATOR_LLM_MODEL,
     INTERVIEW_LLM_MODEL,
     MAX_FOLLOWUPS_PER_BRANCH,
     ORCHESTRATOR_LLM_MODEL,
@@ -33,6 +33,7 @@ from src.config import (
 from src.interview.conversation_log import Action, ConversationLog, QuestionType
 from src.interview.orchestrator import DecisionSource, decide, forced_next_topic
 from src.interview.question_generation import generate_question
+from src.llm_factory import build_llm
 
 # 각본 — 구체 경험 → 모름·포기 → 상충(첫 답변과 역할 충돌) → 인젝션 시도
 _SCRIPTED_ANSWERS = (
@@ -63,8 +64,8 @@ async def main() -> None:
     )
     print(f"[Q1·initial] 간단하게 자기소개 부탁드립니다. (position={position})\n")
 
-    orchestrator_llm = inference.LLM(model=ORCHESTRATOR_LLM_MODEL)
-    interview_llm = inference.LLM(model=INTERVIEW_LLM_MODEL)
+    orchestrator_llm = build_llm(ORCHESTRATOR_LLM_MODEL, BEDROCK_ORCHESTRATOR_LLM_MODEL)
+    interview_llm = build_llm(INTERVIEW_LLM_MODEL, BEDROCK_INTERVIEW_LLM_MODEL)
     try:
         for answer in _SCRIPTED_ANSWERS:
             log.append_answer(answer, _now())

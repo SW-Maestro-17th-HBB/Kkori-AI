@@ -20,13 +20,31 @@ from pydantic import BaseModel
 from src.config import ORCHESTRATOR_INPUT_TOKEN_BUDGET, UTTERANCE_INJECTION_TOKEN_CAP
 from src.interview.context import estimate_tokens, orchestrator_context
 from src.interview.conversation_log import Action, ConversationLog, FollowUpType
-from src.interview.llm_stream import collect_chat_text
+from src.interview.llm_stream import collect_tool_call_arguments
 from src.interview.prompts import orchestrator_instructions
 
 logger = logging.getLogger(__name__)
 
 # 구조화 출력·직렬화 오버헤드용 예약 토큰 — 대화 직렬화 예산에서 미리 뺀다
 _OUTPUT_RESERVE_TOKENS = 300
+
+# 구조화 출력은 강제 tool 호출로 보장한다 — response_format이 없는 프로바이더
+# (Bedrock Converse)에서도 스키마가 tool 파라미터로 강제되는 공통 경로
+_DECISION_TOOL_NAME = "save_decision"
+
+
+def _decision_tool(schema: type[BaseModel]) -> agents_llm.Tool:
+    async def _save(raw_arguments: dict) -> str:  # 실행되지 않는다 — 스키마 강제 전용
+        return ""
+
+    return agents_llm.function_tool(
+        _save,
+        raw_schema={
+            "name": _DECISION_TOOL_NAME,
+            "description": "면접 답변 평가 결과를 저장한다.",
+            "parameters": schema.model_json_schema(),
+        },
+    )
 
 
 class OrchestratorDecision(BaseModel):
@@ -124,8 +142,10 @@ async def decide(
                 conversation, wrap_up_remaining_minutes=wrap_up_remaining_minutes
             ),
         )
-        text = await collect_chat_text(llm, chat_ctx, response_format=schema)
-        parsed = schema.model_validate_json(text)
+        arguments = await collect_tool_call_arguments(
+            llm, chat_ctx, tool=_decision_tool(schema), tool_name=_DECISION_TOOL_NAME
+        )
+        parsed = schema.model_validate_json(arguments)
     except Exception as exc:
         # 예외 객체를 기록하지 않는다 — ValidationError의 input_value 등에
         # 답변 원문·개인정보가 그대로 담길 수 있다 (타입명만)

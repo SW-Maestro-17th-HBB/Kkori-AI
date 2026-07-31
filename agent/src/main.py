@@ -9,6 +9,9 @@ from livekit.agents import Agent, AgentServer, AgentSession, TurnHandlingOptions
 
 from src.config import (
     AGENT_NAME,
+    BEDROCK_INTERVIEW_LLM_MODEL,
+    BEDROCK_LLM_MODEL,
+    BEDROCK_ORCHESTRATOR_LLM_MODEL,
     HARD_OVERRUN_GRACE_SECONDS,
     INTERVIEW_DURATION_SECONDS,
     INTERVIEW_END_TOPIC,
@@ -41,6 +44,7 @@ from src.interview.redis_sink import (
 from src.interview.report_request import publish_report_request
 from src.interview.transcript_store import DATABASE_URL_ENV, flush_transcript
 from src.interview.turn_pipeline import SpeechResult, TurnPipeline
+from src.llm_factory import build_llm
 from src.log_privacy import install_privacy_filter
 from src.session_context import parse_job_metadata
 
@@ -158,7 +162,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     )
     interview_clock.start()
 
-    selection_llm = inference.LLM(model=LLM_MODEL)
+    selection_llm = build_llm(LLM_MODEL, BEDROCK_LLM_MODEL)
 
     # 초기 질문은 세션 시작(마이크 입력·턴 처리 활성화) 전에 확정한다 —
     # LLM은 목록에서 번호만 고르고, 발화는 인사말 + 목록 원문으로 조립한다.
@@ -166,8 +170,8 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         selection_llm, position=position, resume_context=resume_context
     )
 
-    orchestrator_llm = inference.LLM(model=ORCHESTRATOR_LLM_MODEL)
-    interview_llm = inference.LLM(model=INTERVIEW_LLM_MODEL)
+    orchestrator_llm = build_llm(ORCHESTRATOR_LLM_MODEL, BEDROCK_ORCHESTRATOR_LLM_MODEL)
+    interview_llm = build_llm(INTERVIEW_LLM_MODEL, BEDROCK_INTERVIEW_LLM_MODEL)
 
     # llm 미지정 — 훅 실행 후 프레임워크가 기본 응답 생성을 건너뛴다(이중 발화 차단).
     # 본론 질문은 TurnPipeline이 세션 밖 LLM으로 생성해 say()로 발화한다.

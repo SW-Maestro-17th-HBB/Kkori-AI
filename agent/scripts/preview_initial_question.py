@@ -24,10 +24,9 @@ from dotenv import load_dotenv
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 load_dotenv()
 
-from livekit.agents import inference
-
-from src.config import LLM_MODEL
+from src.config import BEDROCK_LLM_MODEL, LLM_MODEL
 from src.interview.initial_question import initial_utterance, select_initial_question
+from src.llm_factory import build_llm
 
 
 async def main() -> None:
@@ -35,8 +34,8 @@ async def main() -> None:
     resume_context = os.getenv("KKORI_RESUME_CONTEXT_FIXTURE") or None
     n = int(os.getenv("KKORI_PREVIEW_N", "3"))
 
-    print(f"model={LLM_MODEL} / position={position} / 요약={'있음' if resume_context else '없음'}")
-    llm = inference.LLM(model=LLM_MODEL)
+    llm = build_llm(LLM_MODEL, BEDROCK_LLM_MODEL)
+    print(f"llm={llm.model} / position={position} / 요약={'있음' if resume_context else '없음'}")
     counts: dict[str, int] = {}
     try:
         for i in range(n):
