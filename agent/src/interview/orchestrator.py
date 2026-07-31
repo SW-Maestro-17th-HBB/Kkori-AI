@@ -15,6 +15,10 @@ from enum import StrEnum
 from typing import Literal
 
 from livekit.agents import llm as agents_llm
+
+# 구 response_format 경로가 쓰던 것과 같은 strict 정규화(OpenAI SDK 벤더링) — 공개 API가
+# 아니지만 inference 플러그인의 response_format 처리와 같은 의존 표면이다(버전 고정 ~=1.6.6)
+from livekit.agents.llm._strict import to_strict_json_schema
 from pydantic import BaseModel
 
 from src.config import ORCHESTRATOR_INPUT_TOKEN_BUDGET, UTTERANCE_INJECTION_TOKEN_CAP
@@ -42,7 +46,11 @@ def _decision_tool(schema: type[BaseModel]) -> agents_llm.Tool:
         raw_schema={
             "name": _DECISION_TOOL_NAME,
             "description": "면접 답변 평가 결과를 저장한다.",
-            "parameters": schema.model_json_schema(),
+            # strict 정규화 + strict 플래그 — inference(OpenAI 호환) 경로에서 구
+            # response_format과 동일한 스키마 준수를 보장한다. aws 직렬화는
+            # name·description·parameters만 사용하므로 strict 키는 Bedrock에 새지 않는다.
+            "strict": True,
+            "parameters": to_strict_json_schema(schema),
         },
     )
 

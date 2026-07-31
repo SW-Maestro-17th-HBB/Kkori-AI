@@ -226,6 +226,10 @@ def test_chat_is_called_with_forced_decision_tool():
     # 스키마는 강제 tool의 파라미터로 전달되고, tool_choice가 해당 tool을 강제한다
     assert call["tool_choice"] == {"type": "function", "function": {"name": _DECISION_TOOL_NAME}}
     (tool,) = call["tools"]
-    assert tool.info.raw_schema["parameters"] == OrchestratorDecision.model_json_schema()
+    # strict 정규화 스키마 + strict 플래그 — inference(OpenAI 호환) 경로의 스키마 준수 보장
+    assert tool.info.raw_schema["strict"] is True
+    parameters = tool.info.raw_schema["parameters"]
+    assert parameters["additionalProperties"] is False
+    assert set(parameters["required"]) == set(OrchestratorDecision.model_fields)
     prompt = call["chat_ctx"].items[-1].text_content
     assert "[Q1|root1]" in prompt  # 번호 태그 직렬화가 지시에 포함된다
