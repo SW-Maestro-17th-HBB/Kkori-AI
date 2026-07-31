@@ -162,16 +162,24 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     )
     interview_clock.start()
 
-    selection_llm = build_llm(LLM_MODEL, BEDROCK_LLM_MODEL)
-
     # 초기 질문은 세션 시작(마이크 입력·턴 처리 활성화) 전에 확정한다 —
     # LLM은 목록에서 번호만 고르고, 발화는 인사말 + 목록 원문으로 조립한다.
-    question = await select_initial_question(
-        selection_llm, position=position, resume_context=resume_context
-    )
+    # 선택 전용 LLM은 여기서만 쓰이므로 세션 수명까지 끌고 가지 않고 즉시 닫는다.
+    selection_llm = build_llm(LLM_MODEL, BEDROCK_LLM_MODEL)
+    try:
+        question = await select_initial_question(
+            selection_llm, position=position, resume_context=resume_context
+        )
+    finally:
+        await selection_llm.aclose()
 
     orchestrator_llm = build_llm(ORCHESTRATOR_LLM_MODEL, BEDROCK_ORCHESTRATOR_LLM_MODEL)
-    interview_llm = build_llm(INTERVIEW_LLM_MODEL, BEDROCK_INTERVIEW_LLM_MODEL)
+    try:
+        interview_llm = build_llm(INTERVIEW_LLM_MODEL, BEDROCK_INTERVIEW_LLM_MODEL)
+    except BaseException:
+        # 부분 초기화 실패 — shutdown 콜백 등록 전이라 여기서 직접 정리한다
+        await orchestrator_llm.aclose()
+        raise
 
     # llm 미지정 — 훅 실행 후 프레임워크가 기본 응답 생성을 건너뛴다(이중 발화 차단).
     # 본론 질문은 TurnPipeline이 세션 밖 LLM으로 생성해 say()로 발화한다.
@@ -234,7 +242,6 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         # 정리는 실제 job shutdown 시점에만 수행한다(aclose는 멱등)
         await pipeline.aclose()
         await asyncio.gather(
-            selection_llm.aclose(),
             orchestrator_llm.aclose(),
             interview_llm.aclose(),
             return_exceptions=True,

@@ -64,9 +64,12 @@ async def main() -> None:
     )
     print(f"[Q1·initial] 간단하게 자기소개 부탁드립니다. (position={position})\n")
 
-    orchestrator_llm = build_llm(ORCHESTRATOR_LLM_MODEL, BEDROCK_ORCHESTRATOR_LLM_MODEL)
-    interview_llm = build_llm(INTERVIEW_LLM_MODEL, BEDROCK_INTERVIEW_LLM_MODEL)
+    # 생성도 try 안에서 — 두 번째 생성이 실패해도 첫 인스턴스가 정리되도록
+    orchestrator_llm = None
+    interview_llm = None
     try:
+        orchestrator_llm = build_llm(ORCHESTRATOR_LLM_MODEL, BEDROCK_ORCHESTRATOR_LLM_MODEL)
+        interview_llm = build_llm(INTERVIEW_LLM_MODEL, BEDROCK_INTERVIEW_LLM_MODEL)
         for answer in _SCRIPTED_ANSWERS:
             log.append_answer(answer, _now())
             print(f"[답변] {answer}")
@@ -115,8 +118,10 @@ async def main() -> None:
             fallback_mark = " [폴백]" if generated.is_fallback else ""
             print(f"[Q{number}·{tag}]{fallback_mark} {generated.text} (생성 {latency:.1f}s)\n")
     finally:
-        await orchestrator_llm.aclose()
-        await interview_llm.aclose()
+        if orchestrator_llm is not None:
+            await orchestrator_llm.aclose()
+        if interview_llm is not None:
+            await interview_llm.aclose()
 
     roots = log.branch_roots()
     print(f"줄기 수: {len(roots)} — 루트: {roots}")
