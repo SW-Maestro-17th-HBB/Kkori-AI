@@ -1,5 +1,8 @@
 """에이전트 구성값 — main 임포트 부수효과(AgentServer 생성 등) 없이 참조 가능한 상수 모음."""
 
+# 명시 디스패치 등록명 — Spring createDispatch(agentName)와 동일 값 (세션 생성 계약, 임의 변경 금지)
+AGENT_NAME = "kkori-interviewer"
+
 # LiveKit Inference 경유 모델 — 별도 프로바이더 키 없이 LiveKit 자격증명만으로 동작
 STT_MODEL = "deepgram/nova-3"
 STT_LANGUAGE = "ko"
@@ -32,7 +35,7 @@ WRAP_UP_REMAINING_SECONDS = 5 * 60  # soft — 남은 시간이 이하로 내려
 HARD_OVERRUN_GRACE_SECONDS = 3 * 60  # hard — 예정 종료 초과 유예, 소진 시 코드 강제 클로징
 
 # 세션 정리·퇴장 — docs/prd/interview-end.md §3
-INTERVIEW_END_TOPIC = "interview:end"  # 사용자 종료 SendData topic [미확정 — Spring 계약 합의]
+INTERVIEW_END_TOPIC = "interview:end"  # 사용자 종료 SendData topic — Spring 계약 확정
 END_STEP_TIMEOUT_SECONDS = 10  # 종료 시퀀스 외부 호출(DB·Redis·LiveKit) 단계별 타임아웃
 ROOM_DELETE_MAX_ATTEMPTS = 3  # 룸 삭제 bounded retry — best-effort 단계가 아니다
 ROOM_DELETE_RETRY_BACKOFF_SECONDS = 2  # 재시도 간격 — 연속 재시도는 같은 일시 장애 창에서 전부 실패한다

@@ -157,8 +157,8 @@
 
 - **종료 시퀀스(순서 고정)**: (1) 종료 상태 `CLOSING` 진입(진입 부수효과로 **종료 표식 기록** — 아래) → (2) 클로징 재생 완료(§2 — 실패 시에도 진행) → (3) **대화 로그 확정**: 신규 커밋 차단 + Redis write-through writer drain·종료(§4 — 큐에 대기 중인 append가 이후 정리된 키를 되살리지 않게 하는 순서 보장) → (4) transcript DB flush(§4) → (5) Redis 사본 정리(`DEL` — flush 성공 시에만, §4) → (6) 리포트 생성 요청 발행(§5 — flush 성공 시에만) → (7) **룸 삭제**(bounded retry) → (8) 잡 종료. 룸 삭제를 제외한 각 단계는 실패해도 로그 후 다음 단계로 진행한다(퇴장 보장).
 - **유한 시간 보장(timeout budget)**: 종료 시퀀스의 모든 외부 호출(DB·Redis·LiveKit API)에 명시적 타임아웃을 둔다 — 재시도 횟수 제한만으로는 무한 대기를 막지 못한다(호출이 hang이면 재시도에 도달하지 못한다). 시퀀스 전체가 유한 시간 안에 반드시 잡 종료에 도달한다. 타임아웃 값은 config 상수 **[미확정 — 실측 조정]**.
-- **종료 표식(termination marker)**: `CLOSING` 진입 부수효과로 Redis에 종료 표식을 기록한다(키 예: `interview:{sessionId}:termination` — 종료 원인·시각, TTL은 transcript 사본과 동일 원칙, sessionId 부재 시 생략). **transcript 행과 독립적인 종료 증거**다 — flush까지 실패한 최악 경로에서도 "이 세션은 종료 국면에 진입했다"가 남는다(클로징 재생 **전** 기록이므로 클로징 청취까지 보장하지는 않는다). 기록 실패는 best-effort(경고 로그) — 이 경우의 판별은 아래 계약의 transcript 행 우선순위가 흡수한다(행이 있으면 `ENDED`, 행도 없으면 표식 없음 경로로 후퇴). **조회 주체는 Spring이다(확정)** — Spring이 `AGENT_LOST` 처리(재dispatch 결정) **전에** 종료 표식을 직접 조회한다. 대안 기각: 재dispatch된 agent의 자가 판별은 이미 재dispatch가 일어난 뒤라 "재dispatch 금지"를 만족할 수 없고, agent→Spring 종료 API는 새 HTTP 결합을, Spring 소유 저장소 기록은 쓰기 권한 경계 위반을 만든다. 표식 키·형식 세부만 합의 시 확정 **[미확정 — 키·형식]**.
-- **퇴장은 룸 삭제로 한다**: agent가 룸을 남겨두고 먼저 퇴장하면 Spring webhook 매핑상 `participant_left(agent)` → `AGENT_LOST`(재dispatch 시도)로 오인된다. agent가 LiveKit 서버 API로 룸을 삭제하면 `room_finished`가 발화되고, 드래프트 매핑(`ACTIVE` + `room_finished` → `ENDED`)대로 Spring이 정상 종료로 전이한다. 룸 삭제와 전후 이벤트의 경쟁은 Spring의 terminal no-op 가드가 수렴한다(계약 전제 — Spring 스토리와 합의 **[미확정]**). 따라서 **룸 삭제는 best-effort 단계가 아니다** — 실패한 채 퇴장하면 방지하려던 `AGENT_LOST` 오인 경로로 그대로 진입한다. 타임아웃을 포함한 bounded retry(횟수·간격 **[미확정 — 실측 조정]**) 후에도 실패하면 오류 로그를 남기고 잡을 종료한다. 이때 Spring의 `AGENT_LOST` 처리가 종료된 면접을 잘못 재dispatch하지 않도록, **종료 표식·transcript 행 기준의 판별 계약**을 명시한다 — transcript 행만으로는 flush 실패 경로를 구분할 수 없다 **[미확정 — Spring 스토리와 합의]**:
+- **종료 표식(termination marker)**: `CLOSING` 진입 부수효과로 Redis에 종료 표식을 기록한다(키: `interview:{sessionId}:termination` — 종료 원인·시각, TTL은 transcript 사본과 동일 원칙, sessionId 부재 시 생략). **transcript 행과 독립적인 종료 증거**다 — flush까지 실패한 최악 경로에서도 "이 세션은 종료 국면에 진입했다"가 남는다(클로징 재생 **전** 기록이므로 클로징 청취까지 보장하지는 않는다). 기록 실패는 best-effort(경고 로그) — 이 경우의 판별은 아래 계약의 transcript 행 우선순위가 흡수한다(행이 있으면 `ENDED`, 행도 없으면 표식 없음 경로로 후퇴). **조회 주체는 Spring이다(확정)** — Spring이 `AGENT_LOST` 처리(재dispatch 결정) **전에** 종료 표식을 직접 조회한다. 대안 기각: 재dispatch된 agent의 자가 판별은 이미 재dispatch가 일어난 뒤라 "재dispatch 금지"를 만족할 수 없고, agent→Spring 종료 API는 새 HTTP 결합을, Spring 소유 저장소 기록은 쓰기 권한 경계 위반을 만든다. 표식 키·형식 **확정** — 키 `interview:{sessionId}:termination`, 값 JSON `{"cause": "<종료 원인>", "markedAt": "<UTC ISO-8601(초 단위, Z)>"}` (현행 구현 그대로).
+- **퇴장은 룸 삭제로 한다**: agent가 룸을 남겨두고 먼저 퇴장하면 Spring webhook 매핑상 `participant_left(agent)` → `AGENT_LOST`(재dispatch 시도)로 오인된다. agent가 LiveKit 서버 API로 룸을 삭제하면 `room_finished`가 발화되고, 드래프트 매핑(`ACTIVE` + `room_finished` → `ENDED`)대로 Spring이 정상 종료로 전이한다. 룸 삭제와 전후 이벤트의 경쟁은 Spring의 terminal no-op 가드가 수렴한다(계약 전제 — 후속 Spring 스토리 완료 조건으로 이관). 따라서 **룸 삭제는 best-effort 단계가 아니다** — 실패한 채 퇴장하면 방지하려던 `AGENT_LOST` 오인 경로로 그대로 진입한다. 타임아웃을 포함한 bounded retry(횟수·간격 **[미확정 — 실측 조정]**) 후에도 실패하면 오류 로그를 남기고 잡을 종료한다. 이때 Spring의 `AGENT_LOST` 처리가 종료된 면접을 잘못 재dispatch하지 않도록, **종료 표식·transcript 행 기준의 판별 계약**을 명시한다 — transcript 행만으로는 flush 실패 경로를 구분할 수 없다 (계약 **확정** — 판별 동작의 구현·검증은 후속 Spring 스토리로 이관, 아래 표):
 
 | 우선순위 | 관측 (agent 소실 시) | 판별 | Spring 처리 |
 | --- | --- | --- | --- |
@@ -168,13 +168,13 @@
 
   **transcript 행을 1순위로 두는 근거**: 비정상 경로는 flush하지 않으므로(§4 — DB INSERT는 정상 종료 시퀀스에서만 일어난다) 행 존재 단독으로 정상 종료의 증거다. 표식은 best-effort라 "표식 없음"이 "종료 아님"을 뜻하지 않는다 — 표식 기록만 실패하고 flush는 성공한 세션도 이 우선순위가 `ENDED`로 정확히 수렴시킨다.
 
-  이 표의 세 경로는 **Spring 세션 스토리의 완료 조건으로 이관**한다 — agent 측 검증은 표식·transcript 행의 기록까지고(검증 기준), 표식을 조회해 재dispatch를 막는 동작의 검증은 Spring 스토리가 담당한다(해당 이슈에 이 계약을 반영해야 이 판별이 성립한다).
+  이 표의 세 경로는 **후속 Spring 스토리의 완료 조건으로 이관**한다(fallback 선기록의 판별 포함 — 아래 ack 부재 보완) — agent 측 검증은 표식·transcript 행의 기록까지고(검증 기준), 표식을 조회해 재dispatch를 막는 동작의 검증은 Spring 스토리가 담당한다(해당 이슈에 이 계약을 반영해야 이 판별이 성립한다). 이 판별은 **공유 인프라 전제**(Spring이 agent의 Redis·Postgres를 직접 읽는다) 위에서 성립하며, 이 전제의 성립 확인도 같은 후속 스토리 완료 조건으로 함께 이관한다.
 - **사용자 명시 종료 수신 = 서버 API data 메시지(`SendData`) (확정)**: 프론트 → Spring `POST /sessions/{id}/end` → Spring이 LiveKit 서버 API `SendData`로 룸에 종료 신호를 보내고(topic 기반), agent가 `data_received` 이벤트로 수신해 정상 종료 시퀀스(클로징 포함)를 실행한다. 종료 요청의 관문을 Spring 하나로 유지한다(상태 단일 소스 원칙). **수신 검증(신뢰 경계)** — 다음을 모두 만족할 때만 종료 신호로 처리하고, 하나라도 어긋나면 무시한다: (1) **발신자가 서버 API일 것** — 서버 SDK 발신 data 패킷은 발신 participant가 없다(`participant is None`)는 것으로 구분한다, (2) 종료 topic 일치, (3) payload의 sessionId가 현재 세션과 일치. 특히 **참가자(candidate 포함)가 보낸 동일 topic 메시지는 무시**한다 — 프론트·참가자가 Spring 관문을 우회해 종료를 트리거할 수 없다.
-  - **ack 부재 보완**: SendData는 응답이 없다(fire-and-forget) — agent의 정상 처리는 룸 삭제 → `room_finished` webhook이 사실상의 ack다. 일정 시간 내 `room_finished`가 오지 않으면 Spring이 룸을 직접 삭제하는 타임아웃 fallback을 계약에 둔다(agent가 신호를 처리하지 못하는 비정상 상태 — flush 유실 감수). 단, **fallback 삭제도 같은 `room_finished`를 발생시키므로 webhook만으로는 정상 종료와 구분할 수 없다** — Spring은 fallback 삭제 **전에** 종료 결과를 먼저 상태로 기록(`ABORTED` 전이 후 삭제)하고, 이후 도착하는 `room_finished`는 terminal no-op으로 수렴시킨다(webhook은 룸 정리 확인 용도). fallback 타임아웃 값 포함 Spring 스토리에서 확정 **[미확정]**.
-  - topic 명칭·페이로드 스키마는 Spring 스토리와 합의해 확정한다 **[미확정 — 제안: topic `interview:end`, 페이로드는 sessionId 검증용 최소 구성]**.
+  - **ack 부재 보완**: SendData는 응답이 없다(fire-and-forget) — agent의 정상 처리는 룸 삭제 → `room_finished` webhook이 사실상의 ack다. 일정 시간 내 `room_finished`가 오지 않으면 Spring이 룸을 직접 삭제하는 타임아웃 fallback을 계약에 둔다(agent가 신호를 처리하지 못하는 비정상 상태 — flush 유실 감수). 단, **fallback 삭제도 같은 `room_finished`를 발생시키므로 webhook만으로는 정상 종료와 구분할 수 없다** — Spring은 fallback 삭제 **전에** 종료 결과를 먼저 상태로 기록(선기록 후 삭제)하고, 이후 도착하는 `room_finished`는 terminal no-op으로 수렴시킨다(webhook은 룸 정리 확인 용도). fallback 계약 **확정** — 선기록 후 룸 삭제이며, **선기록도 위 판별표를 따른다**: `ABORTED`를 기록하기 **전에** transcript 행·종료 표식을 판별표와 같은 우선순위로 조회해, transcript 행이 있으면(= agent가 flush까지 완료하고 룸 삭제만 지연·실패한 경우) `ENDED`로 기록하고 룸 정리만 수행한다 — 정상 종료 세션이 fallback 경합으로 `ABORTED`로 남는 것을 막는다. 조회와 기록 사이의 잔여 경합 창은 감수한다(fallback 타임아웃을 종료 시퀀스 소요보다 충분히 크게 잡는 전제 — 값·경합 창 좁히기는 후속 스토리 실측에서). 타임아웃 값은 후속 Spring 스토리에서 확정 **[미확정 — 타임아웃 값]**.
+  - topic 명칭·페이로드 스키마 **확정**: topic `interview:end`(config `INTERVIEW_END_TOPIC` 현행 값), 페이로드 `{"sessionId": "..."}`(sessionId 검증용 최소 구성).
   - **대안 비교(기각)**: (1) *프론트 → agent RPC* — 호출자가 ack를 받는 장점이 있으나, 종료 요청이 상태 머신의 단일 소스(Spring)를 우회하고 프론트가 Spring·agent 두 경로의 정합을 책임지게 되어 기각. (2) *룸 삭제로 전달* — 클로징 발화가 불가능하고, shutdown 유예 안에 flush·발행을 마쳐야 하며, "룸 삭제 = 정상 종료"와 "룸 삭제 = 비정상 정리"를 agent가 구분할 수 없어 기각.
 - **오류 종료·비정상 경로와의 경계**: TTS 재시도 소진 등 진행 불가로 인한 잡 종료(선행 PRD)는 이 종료 시퀀스를 타지 않는다 — 클로징·flush 없이 종료하고 룸도 삭제하지 않는다(`AGENT_LOST` 경로로 남겨 재dispatch 여지를 보존 — Agent 복원 스토리 범위). candidate 이탈로 인한 세션 종료(현행 기본 동작)도 범위 외다 — 현행 임시 단계에서는 flush 없이 종료되며(ABORTED 상당), 재연결 스토리에서 처리한다. **오류 종료 시 사용자 안내도 범위 외로 확정한다** — 안내 채널(오류 통지 data 메시지·프론트 오류 화면)·부분 flush 여부·상태 정합(복구 가능/불가 구분 신호)이 모두 Agent 복원·프론트 스토리와 얽혀 있어 그쪽에서 함께 설계한다.
-- **로컬·연동 전 폴백**: sessionId 부재(콘솔·자동 디스패치 픽스처) 시 flush·리포트 발행·룸 삭제를 생략하고(각 경고 로그) 클로징·잡 종료는 동일하게 동작한다 — 종료 흐름 자체는 로컬에서 검증 가능하다.
+- **로컬 폴백**: sessionId 부재(콘솔·metadata 없는 로컬 dispatch 픽스처) 시 flush·리포트 발행·룸 삭제를 생략하고(각 경고 로그) 클로징·잡 종료는 동일하게 동작한다 — 종료 흐름 자체는 로컬에서 검증 가능하다.
 - **운영 fail-fast**: 생략 폴백은 sessionId 부재에만 허용한다. **sessionId가 있는 잡(운영 경로)에서 DB·Redis 구성이 없으면 잡 시작 단계에서 실패 처리**한다 — 면접을 끝까지 진행해놓고 저장을 통째로 잃는 것보다 시작 거부가 낫다(구성 오류는 배포 시점에 드러나야 한다).
 
 ### 실행 조건
@@ -199,12 +199,12 @@
 
 ### 인터페이스 요구사항
 
-- 입력: 종료 상태(§1), 외부 종료 신호(`SendData` — topic·페이로드 세부 계약 **[미확정]**).
+- 입력: 종료 상태(§1), 외부 종료 신호(`SendData` — topic `interview:end`, 페이로드 `{"sessionId": "..."}` 확정).
 - 출력: LiveKit 룸 삭제 호출, 잡 종료.
 
 ### 제약사항
 
-- 세션 상태 전이는 실행하지 않는다 — Spring 단일 소스 원칙. **Spring 상태 전이를 유발하는 신호는 룸 종료 이벤트뿐**이다(종료 표식·transcript 행은 Spring이 판별 시 조회하는 재료이지, 전이를 push하는 신호가 아니다).
+- 세션 상태 전이는 실행하지 않는다 — Spring 단일 소스 원칙. **agent 발 신호 중 Spring 상태 전이를 유발하는 것은 룸 종료 이벤트(`room_finished`)뿐**이다(종료 표식·transcript 행은 Spring이 판별 시 조회하는 재료이지, 전이를 push하는 신호가 아니다). fallback 선기록(ack 부재 보완 — 본문 §3)은 이 제약과 별개다: agent 신호가 아니라 **Spring 자체 타임아웃**으로 실행되는 두 번째 terminal 전이 경로(확정)이며, 이후 도착하는 `room_finished`는 terminal no-op으로 수렴한다.
 - Spring 측 종료 API·webhook 핸들러·상태 머신 구현은 범위 외(계약만 정의).
 
 ### 기타 요구사항
@@ -247,7 +247,7 @@
 ### 인터페이스 요구사항
 
 - 입력: 메모리 대화 로그(발화 객체 배열), sessionId.
-- 출력: `interview_transcript` 1행(`session_id`, `content` jsonb). **테이블 DDL·마이그레이션은 agent가 소유·관리한다 (확정)** — transcript 소유권(쓰기 권한 경계 = 소유권 경계)과 일치한다. 스키마는 드래프트 ERD 기준(`id`, `session_id` FK UNIQUE, `content` jsonb, `deleted_at`). 단 `session_id`의 FK 대상(`interview_session`)은 Spring 소유 테이블이므로, FK 제약을 걸지 여부·마이그레이션 적용 순서는 Spring 스키마와 정합 확인이 필요하다 **[미확정 — FK 제약 여부만]**. 적용 방식(마이그레이션 도구 vs 초기화 스크립트)은 구현에서 결정.
+- 출력: `interview_transcript` 1행(`session_id`, `content` jsonb). **테이블 DDL·마이그레이션은 agent가 소유·관리한다 (확정)** — transcript 소유권(쓰기 권한 경계 = 소유권 경계)과 일치한다. 스키마는 드래프트 ERD 기준(`id`, `session_id` UNIQUE, `content` jsonb, `deleted_at`). `session_id`의 FK 대상(`interview_session`)은 Spring 소유 테이블이므로 **FK 제약은 걸지 않는 것으로 확정**한다 — Spring이 `user_id`·`resume_id`도 무FK로 가는 방침과 일관하며, 마이그레이션 적용 순서가 Spring 스키마에 결합되지 않는다. 적용 방식(마이그레이션 도구 vs 초기화 스크립트)은 구현에서 결정.
 
 ### 제약사항
 
