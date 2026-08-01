@@ -4,8 +4,9 @@
 모든 의존(커넥션·평가기·상태 발행)은 인자로 받아 테스트에서 갈아끼운다 (이력서 선례).
 
 흐름 (백엔드 PRD 리포트 §2·§5):
-1. 포기 규칙 — 전달 횟수 임계 도달 시 FAILED 확정 + ACK
-2. 멱등 판단 — 종결 스킵 / 텍스트 완료면 완성 판정만 재시도
+1. 멱등 판단 — 종결 스킵 / 텍스트 완료면 완성 판정만 재시도 (포기 검사보다 먼저 —
+   확정만 남은 리포트를 FAILED 로 종결하지 않기 위해)
+2. 포기 규칙 — 전달 횟수 임계 도달 시 FAILED 확정 + ACK
 3. 유령 방어 — 대본·세션 없으면 로우 생성 전에 스킵 (쓰레기 PENDING 방지)
 4. 로우 확보 — 리포트+Job 한 트랜잭션 생성, 유니크 충돌은 양보
 5. PROCESSING 진입 — CAS. 신규 경로에서 이미 PROCESSING 이면 양보,
@@ -87,24 +88,27 @@ async def process_generation_request(
     sid = request.sessionId
     report = await get_report_by_session(conn, sid)
 
-    # 1. 포기 규칙: 임계 도달 시 재처리 없이 FAILED 확정 → 정상 반환(=ACK).
-    #    도중에 죽어도 재전달본이 같은 경로로 수렴한다(mark_failed 멱등).
-    if delivery_count >= settings.delivery_count_threshold:
-        await _give_up(conn, report, publish, delivery_count)
-        return
-
     if report is not None:
         uid = report["user_id"]
-        # 2a. 종결 상태 = at-least-once 중복 → 스킵, 이벤트 재발행 없음
+        # 1a. 종결 상태 = at-least-once 중복 → 스킵, 이벤트 재발행 없음
         if report["status"] in _TERMINAL:
             return
-        # 2b. 텍스트는 끝났고 완성 판정 직전에 죽은 재전달 → 평가 없이 판정만 재시도
+        # 1b. 텍스트는 끝났고 완성 판정 직전에 죽은 재전달 → 평가 없이 판정만 재시도.
+        #     포기 검사보다 먼저 온다 — 확정(싼 UPDATE 하나)만 남은 리포트를 임계 도달
+        #     배달이 FAILED 로 종결하는 일을 막는다 (리뷰 반영). 이 분기는 항상 ACK 로
+        #     끝나 무한 재시도가 불가능하므로 포기 규칙의 보호 대상이 아니다.
         if report["text_analyzed_at"] is not None:
             if await try_complete(
                 conn, report["id"], require_audio=settings.audio_analysis_enabled
             ):
                 await publish(report["id"], uid, ReportStatus.COMPLETED, "")
             return
+
+    # 2. 포기 규칙: 임계 도달 시 재처리 없이 FAILED 확정 → 정상 반환(=ACK).
+    #    도중에 죽어도 재전달본이 같은 경로로 수렴한다(mark_failed 멱등).
+    if delivery_count >= settings.delivery_count_threshold:
+        await _give_up(conn, report, publish, delivery_count)
+        return
 
     # 3. 유령 방어 — 로우를 만들기 전에 걸러 쓰레기 PENDING 을 남기지 않는다.
     #    (계약상 대본 저장 → 요청 발행 순서이므로, 대본 없음은 유령이지 타이밍이 아니다)

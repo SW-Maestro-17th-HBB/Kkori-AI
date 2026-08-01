@@ -223,6 +223,34 @@ async def test_전달_임계_도달이면_FAILED_확정(conn):
 
 
 @pytest.mark.asyncio
+async def test_확정만_남은_리포트는_임계_도달_배달에서도_완성된다(conn):
+    """텍스트 저장 후 완성 확정 전에 죽었던 리포트 — 포기(FAILED)가 아니라 완성으로 종결 (리뷰 반영)."""
+    session_id = await seed_ready_session(conn)
+    await run(conn, session_id, audio_enabled=True)  # 텍스트 저장됨 + PROCESSING (확정 전 사망 상태 재현)
+
+    spy = PublishSpy()
+    await run(conn, session_id, publish=spy, delivery_count=3)  # 임계 도달 배달, 텍스트 전용 모드
+
+    row = await report_row(conn, session_id)
+    assert row["status"] == "COMPLETED"  # FAILED 가 아니다
+    assert spy.statuses() == [ReportStatus.COMPLETED]
+
+
+@pytest.mark.asyncio
+async def test_음성_대기중_리포트는_임계_도달_배달에서_FAILED가_되지_않는다(conn):
+    """음성 경로가 켜진 모드 — 텍스트가 끝난 리포트는 임계 도달에도 음성을 계속 기다린다."""
+    session_id = await seed_ready_session(conn)
+    await run(conn, session_id, audio_enabled=True)  # 텍스트 완료, 음성 대기
+
+    spy = PublishSpy()
+    await run(conn, session_id, publish=spy, delivery_count=3, audio_enabled=True)
+
+    row = await report_row(conn, session_id)
+    assert row["status"] == "PROCESSING"  # 포기 대상이 아니다 — 완성은 음성 쪽 몫
+    assert spy.events == []
+
+
+@pytest.mark.asyncio
 async def test_신규_경로는_진행중_로우에_양보하고_회수_경로는_재개한다(conn):
     session_id = await seed_ready_session(conn)
     failing = FakeEvaluator(fail_on=frozenset({1}))
