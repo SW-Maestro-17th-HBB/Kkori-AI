@@ -12,8 +12,8 @@
    회수 경로면 죽은 처리자의 몫을 이어받아 재개(전이 없이 진행)
 6. 평가 — 주제(본질문+꼬리)별 LLM 호출, 내부 재시도(지수 백오프)
 7. 총평 + 집계(평균·태그 상위 3 — 결정적 코드)
-8. 저장 — 산출물 일괄 + text_analyzed_at (한 트랜잭션)
-9. 완성 판정 — 음성까지 끝났으면 COMPLETED + 발행 (아니면 음성 쪽이 나중에 판정)
+8~9. 저장 + 완성 판정 — 한 트랜잭션 (산출물 저장과 상태 전이는 같은 트랜잭션).
+   음성 경로가 켜져 있고 음성 미완이면 판정은 통과되지 않고 음성 쪽이 나중에 확정한다.
 """
 
 from __future__ import annotations
@@ -88,7 +88,7 @@ async def process_generation_request(
     report = await get_report_by_session(conn, sid)
 
     # 1. 포기 규칙: 임계 도달 시 재처리 없이 FAILED 확정 → 정상 반환(=ACK).
-    #    이 순서 고정 — 도중에 죽어도 재전달본이 같은 경로로 수렴한다(mark_failed 멱등).
+    #    도중에 죽어도 재전달본이 같은 경로로 수렴한다(mark_failed 멱등).
     if delivery_count >= settings.delivery_count_threshold:
         await _give_up(conn, report, publish, delivery_count)
         return
@@ -161,19 +161,26 @@ async def process_generation_request(
         conn=conn, report_id=report_id, settings=settings,
     )
 
-    # 8. 집계(결정적 코드) + 일괄 저장
-    await save_text_results(
-        conn,
-        report_id,
-        scores=aggregate_scores(evaluated),
-        feedbacks=[_to_feedback(a) for a in evaluated],
-        summary=summary,
-        tag_summary=aggregate_tag_summary(evaluated),
-    )
-
-    # 9. 완성 판정. 음성 분석 경로가 켜져 있으면 둘 다 끝났을 때만(나중에 끝난 쪽이 확정),
-    #    꺼져 있으면(도입 전) 텍스트만으로 즉시 완성한다 — 전달력 빈 값, overall 은 3축 평균.
-    if await try_complete(conn, report_id, require_audio=settings.audio_analysis_enabled):
+    # 8~9. 집계(결정적 코드) + 일괄 저장 + 완성 판정을 한 트랜잭션으로 — "산출물은
+    #      저장됐는데 미완성"인 중간 상태를 남기지 않는다(산출물 저장과 상태 전이는 같은
+    #      트랜잭션 — 이력서 §2.4 불변식과 동일, 리뷰 반영). 안쪽 save_text_results 의
+    #      트랜잭션은 저장점으로 흡수된다. 음성 분석 경로가 켜져 있으면 판정은 둘 다
+    #      끝났을 때만 통과(나중에 끝난 쪽이 확정), 꺼져 있으면(도입 전) 텍스트만으로
+    #      즉시 완성한다 — 전달력 빈 값, overall 은 3축 평균.
+    async with conn.transaction():
+        await save_text_results(
+            conn,
+            report_id,
+            scores=aggregate_scores(evaluated),
+            feedbacks=[_to_feedback(a) for a in evaluated],
+            summary=summary,
+            tag_summary=aggregate_tag_summary(evaluated),
+        )
+        completed = await try_complete(
+            conn, report_id, require_audio=settings.audio_analysis_enabled
+        )
+    # 발행은 커밋 성공 후에만 — 커밋 전 발행은 롤백 시 존재하지 않는 상태를 알리게 된다
+    if completed:
         await publish(report_id, uid, ReportStatus.COMPLETED, "")
 
 
