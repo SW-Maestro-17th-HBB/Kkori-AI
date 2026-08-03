@@ -318,6 +318,9 @@ class BedrockEvaluator:
             tool_choice={"type": "tool", "name": "save_evaluations"},  # 형태 강제
             messages=[{"role": "user", "content": prompt}],
         )
+        if message.stop_reason == "max_tokens":
+            # 잘린 tool 입력은 형식 검증 실패로만 보여 원인 추적이 안 되므로 사유를 구분한다
+            raise ValueError("평가 응답이 길이 제한(max_tokens)에서 잘림")
         for block in message.content:
             if block.type == "tool_use":
                 return validated_topic_result(
@@ -353,6 +356,8 @@ class BedrockEvaluator:
             tool_choice={"type": "tool", "name": "save_summary"},
             messages=[{"role": "user", "content": _SUMMARIZE_PROMPT.format(payload=payload)}],
         )
+        if message.stop_reason == "max_tokens":
+            raise ValueError("총평 응답이 길이 제한(max_tokens)에서 잘림")
         for block in message.content:
             if block.type == "tool_use":
                 return _SummaryOutput.model_validate(block.input).summary
