@@ -4,12 +4,26 @@
 AGENT_NAME = "kkori-interviewer"
 
 # LiveKit Inference 경유 모델 — 별도 프로바이더 키 없이 LiveKit 자격증명만으로 동작
+# (STT·TTS·VAD는 계속 이 경로. LLM은 Bedrock이 기본이며 아래 토글로 전환기 한정 병행)
 STT_MODEL = "deepgram/nova-3"
 STT_LANGUAGE = "ko"
 LLM_MODEL = "openai/gpt-4.1-mini"
 TTS_MODEL = "cartesia/sonic-3"
 TTS_VOICE = "9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"
 TTS_LANGUAGE = "ko"
+
+# LLM 프로바이더 토글 — 전환기 한정(Bedrock 안정화 후 inference 경로·토글 제거 예정).
+# .env는 main의 load_dotenv()가 이 모듈 임포트보다 늦게 읽으므로 환경변수 참조는 사용 시점에 한다.
+LLM_PROVIDER_ENV = "KKORI_LLM_PROVIDER"  # bedrock(기본) | inference
+DEFAULT_LLM_PROVIDER = "bedrock"
+
+# Bedrock 경유 LLM — 서울 리전 + global 크로스리전 프로파일 (2026-07-31 실호출 탐침 확정).
+# 서울은 In-Region·Geo 프로파일 미제공이라 global만 가능(추론 위치 비보장, 실측 지연 us-east-1과 동급).
+# 도쿄 jp. 프로파일은 조직 SCP 명시 거부. 자격증명은 boto3 기본 체인(AWS_ACCESS_KEY_ID/SECRET).
+BEDROCK_REGION = "ap-northeast-2"
+BEDROCK_LLM_MODEL = "global.anthropic.claude-haiku-4-5-20251001-v1:0"
+BEDROCK_ORCHESTRATOR_LLM_MODEL = "global.anthropic.claude-haiku-4-5-20251001-v1:0"
+BEDROCK_INTERVIEW_LLM_MODEL = "global.anthropic.claude-sonnet-4-6"
 
 # candidate 입장 대기 상한(초) — 토큰 입장 윈도우(3분)보다 여유 있게.
 # Spring 준비 타임아웃(PENDING→ABORTED) 도입 전까지 잡이 무기한 점유되지 않도록 하는 로컬 안전망

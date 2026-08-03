@@ -22,8 +22,8 @@ docker build -f agent/Dockerfile -t kkori-agent .    # 이미지 빌드 — 컨�
 docker build -f worker/Dockerfile -t kkori-worker .
 ```
 
-- 에이전트 실행에는 `agent/.env`에 LiveKit Cloud 자격증명 필요 (`agent/.env.example` 참조, Git 비추적)
-- agent는 `agent/tests/` 운용 중 — 단위 테스트(파싱·프롬프트 조립·선택 폴백)는 항상 실행, LLM 스모크 테스트(유료 실호출)는 `KKORI_LIVE_LLM=1` + LiveKit 자격증명이 있을 때만 실행(기본 skip — CI 포함). worker는 `worker/tests/` 운용 중 — 일부 테스트는 로컬 인프라(Postgres/Redis/MinIO) 없으면 skip, CI에서는 서비스 컨테이너로 전부 실행
+- 에이전트 실행에는 `agent/.env`에 LiveKit Cloud 자격증명(STT·TTS·룸)과 AWS 자격증명(Bedrock LLM) 필요 (`agent/.env.example` 참조, Git 비추적)
+- agent는 `agent/tests/` 운용 중 — 단위 테스트(파싱·프롬프트 조립·선택 폴백)는 항상 실행, LLM 스모크 테스트(유료 실호출)는 `KKORI_LIVE_LLM=1` + 프로바이더 자격증명(bedrock 기본 → AWS 키, inference → LiveKit 키)이 있을 때만 실행(기본 skip — CI 포함). worker는 `worker/tests/` 운용 중 — 일부 테스트는 로컬 인프라(Postgres/Redis/MinIO) 없으면 skip, CI에서는 서비스 컨테이너로 전부 실행
 
 ## 작업 규칙
 
@@ -34,7 +34,8 @@ docker build -f worker/Dockerfile -t kkori-worker .
 ## 기술적 결정사항
 
 - **서비스별 독립 uv 프로젝트 (워크스페이스 아님)** — 두 서비스는 상호 import 없이 독립 배포되므로 단일 락파일 워크스페이스 대신 서비스마다 자체 pyproject.toml·uv.lock을 둔다(서비스 간 잠금 결합 제거, 팀원 간 작업 충돌 방지). 각 Dockerfile이 자기 락파일로 `uv sync --locked --no-dev` 후 소스 복사. pyproject에 build-system 없이 `[tool.uv] package = false`로 의존성만 설치(현행 `src/` 레이아웃 유지)
-- **livekit-agents + LiveKit Inference** — 최종적으로 self-host SFU 예정이라 STT·LLM·TTS built-in이 없어 직접 연동이 필요하지만, 개발 단계에서는 LiveKit Cloud + Inference를 사용해 별도 프로바이더 API 키 없이 LiveKit 자격증명 하나로 동작. 모델 구성은 `agent/src/config.py` 상수로, 교체 시 상수만 변경
+- **livekit-agents + LiveKit Inference(STT·TTS) + Bedrock(LLM)** — STT·TTS·VAD는 LiveKit Cloud Inference, LLM은 `livekit-plugins-aws`(`aws.LLM`, Converse Stream)로 Bedrock Claude를 사용(worker와 동일 AWS 계정). 리전은 서울 + `global.` 크로스리전 프로파일(2026-07-31 실호출 탐침 — 서울은 global만 제공, 도쿄 jp.는 SCP 명시 거부, 지연은 us-east-1과 동급). 모델 구성은 `agent/src/config.py` 상수로, 교체 시 상수만 변경. 전환기 한정 `KKORI_LLM_PROVIDER=inference` 토글로 구 LiveKit Inference LLM 경로 병행(안정화 후 토글·inference LLM 경로 제거 예정, 팩토리는 `src/llm_factory.py`)
+- **Orchestrator 구조화 출력은 강제 tool 호출** — `response_format`은 프로바이더 공통 지원이 아니어서(Bedrock Converse 미지원), 판단 스키마를 tool 파라미터로 강제하고(`tool_choice`로 해당 tool 지정) 인자 JSON을 파싱한다. 실패는 기존과 동일하게 폴백 수렴
 - **명시 디스패치** — `agent_name="kkori-interviewer"`(`config.AGENT_NAME`, Spring `createDispatch`와 동일 값)로 등록해 자동 입장을 껐다. 운영 입장은 Spring이 세션 생성 시 `createDispatch(agentName, metadata)`로 수행. 로컬 검증: console 모드는 무영향, dev 모드는 `lk dispatch create --room <룸> --agent-name kkori-interviewer --metadata '...'`로 입장시킨다(픽스처 `KKORI_*_FIXTURE`는 metadata 없는 dispatch 전용)
 - **재연결 미처리(현재)** — 참가자 퇴장 시 세션 즉시 종료(기본값). `close_on_disconnect=False` + 재연결 창 처리는 INTERRUPTED 상태 스토리 범위
 

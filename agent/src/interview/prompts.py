@@ -174,7 +174,7 @@ def closing_statements_for(cause: EndCause) -> tuple[str, ...]:
 def orchestrator_instructions(
     conversation_text: str, *, wrap_up_remaining_minutes: int | None = None
 ) -> str:
-    """답변 평가·액션 판단 지시 — 출력 형식은 response_format 스키마가 강제한다.
+    """답변 평가·액션 판단 지시 — 출력 형식은 강제 tool 호출의 파라미터 스키마가 보장한다.
 
     wrap_up_remaining_minutes가 주어지면 마무리 단계 변형이다(docs/prd/interview-end.md
     §2): 남은 시간이 판단 재료로 주입되고, 판단 규칙이 {FOLLOW_UP, FINAL_QUESTION,

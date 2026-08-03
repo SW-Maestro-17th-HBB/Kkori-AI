@@ -1,7 +1,8 @@
-"""초기 질문 LLM 스모크 테스트 — LiveKit Inference 실호출(유료).
+"""초기 질문 LLM 스모크 테스트 — 선택된 프로바이더(Bedrock 기본) 실호출(유료).
 
-기본은 skip이며, KKORI_LIVE_LLM=1 + LiveKit 자격증명이 있을 때만 실행된다
+기본은 skip이며, KKORI_LIVE_LLM=1 + 프로바이더 자격증명이 있을 때만 실행된다
 (일반 `uv run pytest`가 자동으로 과금 호출을 하지 않도록 명시적 opt-in).
+자격증명: bedrock(기본)은 AWS 키, KKORI_LLM_PROVIDER=inference면 LiveKit 키.
 
     KKORI_LIVE_LLM=1 uv run pytest tests/test_initial_question_llm.py
 
@@ -14,11 +15,19 @@ import os
 
 import pytest
 
-_REQUIRED_ENV = ("LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET")
+from src.config import DEFAULT_LLM_PROVIDER, LLM_PROVIDER_ENV
+
+
+def _required_env() -> tuple[str, ...]:
+    # conftest의 load_dotenv 이후에 평가된다 — 프로바이더별 자격증명만 요구
+    if os.getenv(LLM_PROVIDER_ENV, DEFAULT_LLM_PROVIDER) == "inference":
+        return ("LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET")
+    return ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")
+
 
 pytestmark = pytest.mark.skipif(
-    os.getenv("KKORI_LIVE_LLM") != "1" or any(not os.getenv(key) for key in _REQUIRED_ENV),
-    reason="KKORI_LIVE_LLM=1 + LiveKit 자격증명 설정 시에만 실호출",
+    os.getenv("KKORI_LIVE_LLM") != "1" or any(not os.getenv(key) for key in _required_env()),
+    reason="KKORI_LIVE_LLM=1 + 프로바이더 자격증명 설정 시에만 실호출",
 )
 
 POSITION = "백엔드"
@@ -29,12 +38,11 @@ RESUME_CONTEXT = (
 
 
 async def _select(position: str | None, resume_context: str | None) -> str:
-    from livekit.agents import inference
-
-    from src.config import LLM_MODEL
+    from src.config import BEDROCK_LLM_MODEL, LLM_MODEL
     from src.interview.initial_question import select_initial_question
+    from src.llm_factory import build_llm
 
-    llm = inference.LLM(model=LLM_MODEL)
+    llm = build_llm(LLM_MODEL, BEDROCK_LLM_MODEL)
     try:
         return await select_initial_question(
             llm, position=position, resume_context=resume_context

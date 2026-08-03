@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from src.interview.conversation_log import Action, ConversationLog, QuestionType
-from src.interview.orchestrator import Decision, DecisionSource, decide
+from src.interview.orchestrator import _DECISION_TOOL_NAME, Decision, DecisionSource, decide
 
 NOW = datetime(2026, 7, 24, 9, 0, 0, tzinfo=timezone.utc)
 
@@ -28,7 +28,13 @@ class _StubStream:
         return self._chunks()
 
     async def _chunks(self):
-        yield SimpleNamespace(delta=SimpleNamespace(content=self._text))
+        # 실제 스트림 형태 — 강제 tool 호출의 인자가 완결 JSON으로 담긴 청크
+        yield SimpleNamespace(
+            delta=SimpleNamespace(
+                content=None,
+                tool_calls=[SimpleNamespace(name=_DECISION_TOOL_NAME, arguments=self._text)],
+            )
+        )
 
 
 class _StubLLM:
