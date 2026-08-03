@@ -9,7 +9,13 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from src.interview.conversation_log import Action, ConversationLog, FollowUpType, QuestionType
-from src.interview.orchestrator import Decision, DecisionSource, OrchestratorDecision, decide
+from src.interview.orchestrator import (
+    _DECISION_TOOL_NAME,
+    Decision,
+    DecisionSource,
+    OrchestratorDecision,
+    decide,
+)
 
 NOW = datetime(2026, 7, 24, 9, 0, 0, tzinfo=timezone.utc)
 
@@ -28,7 +34,13 @@ class _StubStream:
         return self._chunks()
 
     async def _chunks(self):
-        yield SimpleNamespace(delta=SimpleNamespace(content=self._text))
+        # 실제 스트림 형태 — 강제 tool 호출의 인자가 완결 JSON으로 담긴 청크
+        yield SimpleNamespace(
+            delta=SimpleNamespace(
+                content=None,
+                tool_calls=[SimpleNamespace(name=_DECISION_TOOL_NAME, arguments=self._text)],
+            )
+        )
 
 
 class _StubLLM:
@@ -207,9 +219,17 @@ def test_stray_ref_on_non_consistency_is_dropped():
     assert decision.ref_question_number is None
 
 
-def test_chat_is_called_with_response_format_schema():
+def test_chat_is_called_with_forced_decision_tool():
     llm = _StubLLM(json.dumps({"reason": "r", "action": "NEXT_TOPIC"}))
     asyncio.run(decide(llm, _log()))
-    assert llm.calls[0]["response_format"] is OrchestratorDecision
-    prompt = llm.calls[0]["chat_ctx"].items[-1].text_content
+    call = llm.calls[0]
+    # 스키마는 강제 tool의 파라미터로 전달되고, tool_choice가 해당 tool을 강제한다
+    assert call["tool_choice"] == {"type": "function", "function": {"name": _DECISION_TOOL_NAME}}
+    (tool,) = call["tools"]
+    # strict 정규화 스키마 + strict 플래그 — inference(OpenAI 호환) 경로의 스키마 준수 보장
+    assert tool.info.raw_schema["strict"] is True
+    parameters = tool.info.raw_schema["parameters"]
+    assert parameters["additionalProperties"] is False
+    assert set(parameters["required"]) == set(OrchestratorDecision.model_fields)
+    prompt = call["chat_ctx"].items[-1].text_content
     assert "[Q1|root1]" in prompt  # 번호 태그 직렬화가 지시에 포함된다
