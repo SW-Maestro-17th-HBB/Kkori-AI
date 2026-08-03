@@ -343,12 +343,14 @@ async def record_job_error(conn: AsyncConnection, report_id: int, summary: str) 
     """진행 중 마지막 실패 원인 기록 (상태는 바꾸지 않음) — best-effort.
 
     기록 실패가 원래 예외 전파(재시도 경로)를 가리면 안 되므로 삼키고 로그만 남긴다.
+    저장점(transaction 블록)으로 감싸 실패해도 커넥션의 트랜잭션이 오염되지 않게 한다.
     """
     try:
-        await conn.execute(
-            "UPDATE report_generation_jobs SET error_message = %s, updated_at = %s "
-            "WHERE report_id = %s",
-            (summary[:500], _utcnow(), report_id),
-        )
+        async with conn.transaction():
+            await conn.execute(
+                "UPDATE report_generation_jobs SET error_message = %s, updated_at = %s "
+                "WHERE report_id = %s",
+                (summary[:500], _utcnow(), report_id),
+            )
     except Exception:
         logger.warning("Job 오류 기록 실패 (report_id=%s)", report_id, exc_info=True)
