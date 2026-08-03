@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from enum import Enum
 
 from pydantic import BaseModel
@@ -29,7 +30,8 @@ class QuestionType(str, Enum):
 
 
 class Utterance(BaseModel):
-    """대본의 발화 1개. spokenAt 은 ISO-8601 문자열(정렬 키로만 사용, 파싱은 필요 시)."""
+    """대본의 발화 1개. spokenAt 은 ISO-8601 문자열 — 정렬 시 실제 시각으로 파싱한다
+    (문자열 비교는 오프셋·소수점 자릿수가 다르면 시간순을 보장하지 못한다)."""
 
     questionNumber: int
     parentQuestionNumber: int
@@ -61,7 +63,7 @@ def group_utterances(utterances: list[Utterance]) -> list[QuestionAnswer]:
 
     pairs: list[QuestionAnswer] = []
     for number in sorted(numbers):
-        group = sorted(numbers[number], key=lambda u: u.spokenAt)
+        group = sorted(numbers[number], key=lambda u: datetime.fromisoformat(u.spokenAt))
         question = " ".join(u.content for u in group if u.speaker == Speaker.INTERVIEWER)
         answer = " ".join(u.content for u in group if u.speaker == Speaker.USER)
         first = group[0]
