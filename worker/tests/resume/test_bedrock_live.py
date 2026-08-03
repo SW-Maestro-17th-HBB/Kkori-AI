@@ -1,7 +1,7 @@
 """Bedrock 실 호출 통합 테스트 — 명시적으로 켰을 때만 실행한다 (과금 방지).
 
 실행 방법 (worker/.env 에 AWS 자격이 있어야 함):
-    KKORI_LIVE_BEDROCK=1 pytest worker/tests/test_bedrock_live.py -v
+    KKORI_LIVE_BEDROCK=1 uv run --project worker pytest worker/tests/resume/test_bedrock_live.py -v
 
 검증 대상 (가짜 제공자로는 확인 불가한 것들):
 - Bedrock 요청/응답 형식이 실제로 맞는가 (모델 ID·리전·본문 스키마)
@@ -18,7 +18,7 @@ import pytest
 from src.config import Settings
 
 LIVE = os.environ.get("KKORI_LIVE_BEDROCK") == "1"
-ENV_FILE = Path(__file__).parent.parent / ".env"  # worker/.env
+ENV_FILE = Path(__file__).parent.parent.parent / ".env"  # worker/.env
 
 pytestmark = pytest.mark.skipif(
     not LIVE, reason="실 Bedrock 호출 테스트 — KKORI_LIVE_BEDROCK=1 로만 실행(과금)"
@@ -42,22 +42,26 @@ Java, Spring Boot, Redis, PostgreSQL, Docker
 """
 
 
-def _settings() -> Settings:
-    # worker/.env 의 AWS 자격·모델 ID 를 읽고, 제공자만 bedrock 으로 강제
-    s = Settings(_env_file=ENV_FILE)
-    # pydantic-settings 는 AWS_* 를 모델 필드로 안 읽으므로 환경변수로 올린다 (boto3 기본 체인용)
+def _settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
+    # pydantic-settings 는 AWS_* 를 모델 필드로 안 읽으므로 환경변수로 올린다 (boto3 기본 체인용).
+    # monkeypatch 주입이라 테스트 종료 시 복원된다 (다른 테스트로 자격 누출 방지)
     for key in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"):
         if key not in os.environ and ENV_FILE.exists():
             for line in ENV_FILE.read_text().splitlines():
                 if line.startswith(f"{key}="):
-                    os.environ[key] = line.split("=", 1)[1].strip()
+                    monkeypatch.setenv(key, _env_value(line))
     return Settings(_env_file=ENV_FILE, ai_provider="bedrock")
 
 
-def test_claude_구조화_실호출():
+def _env_value(line: str) -> str:
+    """`KEY=값` 줄의 값 — 따옴표와 뒤따르는 주석 제거 (AWS 키 문자셋에 # 는 없다)."""
+    return line.split("=", 1)[1].split(" #", 1)[0].strip().strip("'\"")
+
+
+def test_claude_구조화_실호출(monkeypatch):
     from src.ai.providers import BedrockStructurer
 
-    data = BedrockStructurer(_settings()).structure(SAMPLE_RESUME)
+    data = BedrockStructurer(_settings(monkeypatch)).structure(SAMPLE_RESUME)
 
     assert data.profile.name == "홍길동"
     assert len(data.projects) >= 1
@@ -68,10 +72,10 @@ def test_claude_구조화_실호출():
     print(f"\n구조화 결과: {data.model_dump()}")
 
 
-def test_embed_v4_차원과_의미유사도_실호출():
+def test_embed_v4_차원과_의미유사도_실호출(monkeypatch):
     from src.ai.providers import BedrockEmbedder
 
-    embedder = BedrockEmbedder(_settings())
+    embedder = BedrockEmbedder(_settings(monkeypatch))
     docs = embedder.embed_documents(
         ["Redis Stream 으로 비동기 주문 처리를 구현했다", "오늘 점심은 김치찌개였다"]
     )
@@ -99,12 +103,12 @@ RESUME_PDF = os.environ.get("KKORI_LIVE_RESUME_PDF", "")
 @pytest.mark.skipif(
     not RESUME_PDF, reason="실제 이력서 PDF 테스트 — KKORI_LIVE_RESUME_PDF=<pdf 경로> 로 실행"
 )
-def test_실제_이력서PDF_추출_구조화_청킹():
+def test_실제_이력서PDF_추출_구조화_청킹(monkeypatch):
     """아무 이력서 PDF 나 넣어 추출→구조화→청킹을 실제로 돌려본다 (품질 눈검사용).
 
     실행 예:
         KKORI_LIVE_BEDROCK=1 KKORI_LIVE_RESUME_PDF="/path/to/이력서.pdf" \
-            pytest worker/tests/test_bedrock_live.py::test_실제_이력서PDF_추출_구조화_청킹 -s
+            uv run --project worker pytest worker/tests/resume/test_bedrock_live.py::test_실제_이력서PDF_추출_구조화_청킹 -s
     """
     import json
 
@@ -117,7 +121,7 @@ def test_실제_이력서PDF_추출_구조화_청킹():
     assert not is_empty_text(text), "빈 추출 — 이미지 스캔 PDF 인지 확인"
     print(f"\n[추출] {len(pdf):,} bytes PDF → 텍스트 {len(text):,}자")
 
-    data = BedrockStructurer(_settings()).structure(text)
+    data = BedrockStructurer(_settings(monkeypatch)).structure(text)
     print("\n[구조화 결과]")
     print(json.dumps(data.model_dump(), ensure_ascii=False, indent=2))
     assert data.profile.name, "이름을 못 뽑음"

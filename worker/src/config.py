@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     s3_access_key: str = ""
     s3_secret_key: str = ""
 
+    # --- 리포트 완성 판정 ---
+    # 음성 분석 경로 도입 전에는 텍스트 평가만으로 리포트를 완성한다(백엔드 PRD:
+    # "확정 전까지 Worker는 텍스트 3축으로만 동작하고 delivery_score는 null").
+    # 음성 분석 소비자가 배포될 때 True 로 켜면 "텍스트·음성 둘 다 완료" 판정으로 바뀐다.
+    audio_analysis_enabled: bool = False
+
     # --- AI 제공자 선택 (§8) ---
     # "fake" = 가짜(로컬/테스트, 클라우드 없이) / "bedrock" = 실제(클라우드 준비 후)
     ai_provider: str = "fake"
@@ -46,12 +52,17 @@ class Settings(BaseSettings):
     # 계정이 소속된 조직의 SCP 가 Bedrock 을 us-east-1 에서만 허용한다(서울·global 프로파일 전부 거부).
     bedrock_region: str = "us-east-1"
     structuring_model_id: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+    # 리포트 답변 평가용 — 이력서 구조화와 같은 모델로 시작, 도메인별 독립 교체를 위해 분리
+    evaluation_model_id: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
     # Embed v4 — 출력 차원을 1024 로 지정해 vector(1024) 스키마를 유지한다 (§8)
     embedding_model_id: str = "cohere.embed-v4:0"
     embedding_dim: int = 1024  # 임베딩 모델의 출력 차원 설정에 종속 — 변경 시 스키마도 조정
 
     # --- Redis Stream 소비 (§9) ---
     consumer_group: str = "kkori-worker"
+    # 리포트 워커의 그룹 — 그룹은 스트림별 개념이라 같은 이름도 무방하지만,
+    # 프로세스 분리 운영에서 모니터링·설정을 구분하기 위해 이름을 나눈다.
+    report_consumer_group: str = "kkori-report-worker"
     consumer_name: str = ""  # 빈값이면 런타임에 hostname 사용(인스턴스 구분)
 
     # --- 재량 파라미터 (§9) ---
