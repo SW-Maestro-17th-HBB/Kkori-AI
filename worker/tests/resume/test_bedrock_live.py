@@ -1,7 +1,7 @@
 """Bedrock 실 호출 통합 테스트 — 명시적으로 켰을 때만 실행한다 (과금 방지).
 
 실행 방법 (worker/.env 에 AWS 자격이 있어야 함):
-    KKORI_LIVE_BEDROCK=1 pytest worker/tests/resume/test_bedrock_live.py -v
+    KKORI_LIVE_BEDROCK=1 uv run --project worker pytest worker/tests/resume/test_bedrock_live.py -v
 
 검증 대상 (가짜 제공자로는 확인 불가한 것들):
 - Bedrock 요청/응답 형식이 실제로 맞는가 (모델 ID·리전·본문 스키마)
@@ -108,7 +108,7 @@ def test_실제_이력서PDF_추출_구조화_청킹(monkeypatch):
 
     실행 예:
         KKORI_LIVE_BEDROCK=1 KKORI_LIVE_RESUME_PDF="/path/to/이력서.pdf" \
-            pytest worker/tests/resume/test_bedrock_live.py::test_실제_이력서PDF_추출_구조화_청킹 -s
+            uv run --project worker pytest worker/tests/resume/test_bedrock_live.py::test_실제_이력서PDF_추출_구조화_청킹 -s
     """
     import json
 

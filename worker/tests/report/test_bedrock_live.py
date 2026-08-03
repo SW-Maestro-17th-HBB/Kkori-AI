@@ -1,7 +1,7 @@
 """리포트 평가 Bedrock 실호출 품질 확인 — 명시적으로 켰을 때만 실행한다 (과금 방지).
 
 실행 방법 (worker/.env 에 AWS 자격이 있어야 함):
-    KKORI_LIVE_BEDROCK=1 pytest worker/tests/report/test_bedrock_live.py -v -s
+    KKORI_LIVE_BEDROCK=1 uv run --project worker pytest worker/tests/report/test_bedrock_live.py -v -s
 
 가짜 평가기로는 확인 불가한 것: 채점 기준표(evaluation-criteria.md)가 프롬프트로서
 실제로 작동하는가. 골든 샘플 대본에 기준표가 구분해야 하는 케이스를 심어 두고,
