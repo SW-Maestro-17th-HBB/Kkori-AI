@@ -1,7 +1,7 @@
 """리포트 평가 Bedrock 실호출 품질 확인 — 명시적으로 켰을 때만 실행한다 (과금 방지).
 
 실행 방법 (worker/.env 에 AWS 자격이 있어야 함):
-    KKORI_LIVE_BEDROCK=1 pytest worker/tests/test_report_bedrock_live.py -v -s
+    KKORI_LIVE_BEDROCK=1 pytest worker/tests/report/test_bedrock_live.py -v -s
 
 가짜 평가기로는 확인 불가한 것: 채점 기준표(evaluation-criteria.md)가 프롬프트로서
 실제로 작동하는가. 골든 샘플 대본에 기준표가 구분해야 하는 케이스를 심어 두고,
@@ -33,13 +33,19 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _settings() -> Settings:
+def _settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
+    # monkeypatch 주입이라 테스트 종료 시 환경변수가 복원된다 (다른 테스트로 자격 누출 방지)
     for key in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"):
         if key not in os.environ and ENV_FILE.exists():
             for line in ENV_FILE.read_text().splitlines():
                 if line.startswith(f"{key}="):
-                    os.environ[key] = line.split("=", 1)[1].strip()
+                    monkeypatch.setenv(key, _env_value(line))
     return Settings(_env_file=ENV_FILE, ai_provider="bedrock")
+
+
+def _env_value(line: str) -> str:
+    """`KEY=값` 줄의 값 — 따옴표와 뒤따르는 주석 제거 (AWS 키 문자셋에 # 는 없다)."""
+    return line.split("=", 1)[1].split(" #", 1)[0].strip().strip("'\"")
 
 
 def _u(n, parent, speaker, qtype, content, t):
@@ -83,10 +89,10 @@ GOLDEN_TRANSCRIPT = [
 ]
 
 
-def test_골든_샘플_평가_실호출():
+def test_골든_샘플_평가_실호출(monkeypatch):
     from src.report.evaluator import BedrockEvaluator
 
-    evaluator = BedrockEvaluator(_settings())
+    evaluator = BedrockEvaluator(_settings(monkeypatch))
     pairs = group_utterances([Utterance.model_validate(u) for u in GOLDEN_TRANSCRIPT])
 
     by_number = {}
