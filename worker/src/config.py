@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     s3_access_key: str = ""
     s3_secret_key: str = ""
 
+    # --- 리포트 완성 판정 ---
+    # 음성 분석 경로 도입 전에는 텍스트 평가만으로 리포트를 완성한다(백엔드 PRD:
+    # "확정 전까지 Worker는 텍스트 3축으로만 동작하고 delivery_score는 null").
+    # 음성 분석 소비자가 배포될 때 True 로 켜면 "텍스트·음성 둘 다 완료" 판정으로 바뀐다.
+    audio_analysis_enabled: bool = False
+
     # --- AI 제공자 선택 (§8) ---
     # "fake" = 가짜(로컬/테스트, 클라우드 없이) / "bedrock" = 실제(클라우드 준비 후)
     ai_provider: str = "fake"

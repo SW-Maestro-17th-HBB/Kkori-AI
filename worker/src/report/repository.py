@@ -198,13 +198,19 @@ async def mark_failed(conn: AsyncConnection, report_id: int, reason: str) -> boo
     return cur.rowcount == 1
 
 
-async def try_complete(conn: AsyncConnection, report_id: int) -> bool:
-    """완성 판정 — 텍스트·음성 두 단계가 모두 끝난 리포트만 COMPLETED 로 확정한다.
+async def try_complete(
+    conn: AsyncConnection, report_id: int, *, require_audio: bool = True
+) -> bool:
+    """완성 판정 — 조건부 UPDATE 한 문장으로 COMPLETED 를 확정한다.
 
-    조건부 UPDATE 한 문장이라 텍스트/음성 어느 쪽이 나중에 끝나든 "나중에 끝난 쪽"의
-    호출만 성공하고, 이미 완결됐거나 다른 단계가 미완이면 0행(False — 그대로 둔다).
+    require_audio=True(음성 분석 경로 운영 시): 텍스트·음성 두 단계가 모두 끝난
+    리포트만 완성한다 — 어느 쪽이 나중에 끝나든 "나중에 끝난 쪽"의 호출만 성공.
+    require_audio=False(음성 경로 도입 전): 텍스트만 끝나면 완성한다 — 전달력은
+    빈 값으로 남고 overall 은 텍스트 3축 평균이 된다.
+    이미 완결됐거나 필요한 단계가 미완이면 0행(False — 그대로 둔다).
     overall_score = 평가된 축의 평균 반올림: 텍스트 3축 + (delivery 가 있으면) 전달력.
     """
+    audio_condition = "AND r.audio_analyzed_at IS NOT NULL" if require_audio else ""
     cur = await conn.execute(
         """
         UPDATE reports r
@@ -220,8 +226,8 @@ async def try_complete(conn: AsyncConnection, report_id: int) -> bool:
             WHERE s.report_id = %(rid)s
         ) sub
         WHERE r.id = %(rid)s AND r.status = %(processing)s
-          AND r.text_analyzed_at IS NOT NULL AND r.audio_analyzed_at IS NOT NULL
-        """,
+          AND r.text_analyzed_at IS NOT NULL {audio_condition}
+        """.format(audio_condition=audio_condition),
         {
             "completed": ReportStatus.COMPLETED.value,
             "processing": ReportStatus.PROCESSING.value,

@@ -43,9 +43,10 @@ class PublishSpy:
         return [e[2] for e in self.events]
 
 
-def fast_settings(dsn: str) -> Settings:
-    """재시도 대기 없는 테스트용 설정."""
-    return Settings(postgres_dsn=dsn, retry_base_delay_s=0.0)
+def fast_settings(dsn: str, audio_enabled: bool = False) -> Settings:
+    """재시도 대기 없는 테스트용 설정. audio_enabled 기본값은 운영 기본(음성 경로 도입 전)과 동일."""
+    return Settings(postgres_dsn=dsn, retry_base_delay_s=0.0,
+                    audio_analysis_enabled=audio_enabled)
 
 
 async def seed_ready_session(conn) -> int:
@@ -55,13 +56,13 @@ async def seed_ready_session(conn) -> int:
 
 
 async def run(conn, session_id, *, evaluator=None, publish=None, delivery_count=1,
-              is_reclaimed=False):
+              is_reclaimed=False, audio_enabled=False):
     await process_generation_request(
         ReportGenerationRequested(sessionId=session_id),
         conn=conn,
         evaluator=evaluator if evaluator is not None else FakeEvaluator(),
         publish=publish if publish is not None else PublishSpy(),
-        settings=fast_settings(str(conn.info.dsn)),
+        settings=fast_settings(str(conn.info.dsn), audio_enabled),
         delivery_count=delivery_count,
         is_reclaimed=is_reclaimed,
     )
@@ -75,17 +76,20 @@ async def report_row(conn, session_id):
 
 
 @pytest.mark.asyncio
-async def test_정상_완주_음성_대기(conn):
+async def test_정상_완주_음성_경로_도입_전에는_즉시_완성(conn):
+    """기본 설정(audio_analysis_enabled=False) — 텍스트 평가만으로 COMPLETED 확정."""
     session_id = await seed_ready_session(conn)
     spy = PublishSpy()
 
     await run(conn, session_id, publish=spy)
 
     row = await report_row(conn, session_id)
-    assert row["status"] == "PROCESSING"  # 음성 미완 — 완성은 음성 쪽 몫
+    assert row["status"] == "COMPLETED"
+    assert row["overall_score"] == 80  # 텍스트 3축 평균 (Fake 기본값)
+    assert row["delivery_score"] is None  # 전달력은 빈 값 유지
     assert row["text_analyzed_at"] is not None
     assert row["summary"] is not None
-    assert spy.statuses() == [ReportStatus.PROCESSING]  # COMPLETED 는 아직
+    assert spy.statuses() == [ReportStatus.PROCESSING, ReportStatus.COMPLETED]
     cur = await conn.execute(
         "SELECT question_number FROM report_feedbacks WHERE report_id = %s "
         "ORDER BY question_number", (row["id"],)
@@ -98,17 +102,31 @@ async def test_정상_완주_음성_대기(conn):
 
 
 @pytest.mark.asyncio
+async def test_음성_경로가_켜지면_완주_후_음성_대기(conn):
+    """audio_analysis_enabled=True — 텍스트만 끝난 리포트는 PROCESSING 에 머문다."""
+    session_id = await seed_ready_session(conn)
+    spy = PublishSpy()
+
+    await run(conn, session_id, publish=spy, audio_enabled=True)
+
+    row = await report_row(conn, session_id)
+    assert row["status"] == "PROCESSING"  # 음성 미완 — 완성은 음성 쪽 몫
+    assert row["text_analyzed_at"] is not None
+    assert spy.statuses() == [ReportStatus.PROCESSING]  # COMPLETED 는 아직
+
+
+@pytest.mark.asyncio
 async def test_음성이_이미_끝났으면_완주_시_COMPLETED(conn):
     session_id = await seed_ready_session(conn)
     spy = PublishSpy()
-    await run(conn, session_id, publish=spy)  # 텍스트 완료 (PROCESSING 잔류)
+    await run(conn, session_id, publish=spy, audio_enabled=True)  # 텍스트 완료 (PROCESSING 잔류)
 
     row = await report_row(conn, session_id)
     await conn.execute(  # 음성 분석 완료를 흉내
         "UPDATE reports SET audio_analyzed_at = now(), delivery_score = 60 WHERE id = %s",
         (row["id"],),
     )
-    await run(conn, session_id, publish=spy)  # 재전달 → 판정만 재시도
+    await run(conn, session_id, publish=spy, audio_enabled=True)  # 재전달 → 판정만 재시도
 
     row = await report_row(conn, session_id)
     assert row["status"] == "COMPLETED"
@@ -137,9 +155,9 @@ async def test_종결_상태_재전달은_아무것도_안_한다(conn):
 async def test_재전달_멱등_판정_불가면_발행_없음(conn):
     session_id = await seed_ready_session(conn)
     spy = PublishSpy()
-    await run(conn, session_id, publish=spy)  # 완주 (음성 대기)
+    await run(conn, session_id, publish=spy, audio_enabled=True)  # 완주 (음성 대기)
 
-    await run(conn, session_id, publish=spy)  # 같은 메시지 재전달
+    await run(conn, session_id, publish=spy, audio_enabled=True)  # 같은 메시지 재전달
 
     assert spy.statuses() == [ReportStatus.PROCESSING]  # 재평가·재발행 없음
     row = await report_row(conn, session_id)
@@ -205,6 +223,34 @@ async def test_전달_임계_도달이면_FAILED_확정(conn):
 
 
 @pytest.mark.asyncio
+async def test_확정만_남은_리포트는_임계_도달_배달에서도_완성된다(conn):
+    """텍스트 저장 후 완성 확정 전에 죽었던 리포트 — 포기(FAILED)가 아니라 완성으로 종결 (리뷰 반영)."""
+    session_id = await seed_ready_session(conn)
+    await run(conn, session_id, audio_enabled=True)  # 텍스트 저장됨 + PROCESSING (확정 전 사망 상태 재현)
+
+    spy = PublishSpy()
+    await run(conn, session_id, publish=spy, delivery_count=3)  # 임계 도달 배달, 텍스트 전용 모드
+
+    row = await report_row(conn, session_id)
+    assert row["status"] == "COMPLETED"  # FAILED 가 아니다
+    assert spy.statuses() == [ReportStatus.COMPLETED]
+
+
+@pytest.mark.asyncio
+async def test_음성_대기중_리포트는_임계_도달_배달에서_FAILED가_되지_않는다(conn):
+    """음성 경로가 켜진 모드 — 텍스트가 끝난 리포트는 임계 도달에도 음성을 계속 기다린다."""
+    session_id = await seed_ready_session(conn)
+    await run(conn, session_id, audio_enabled=True)  # 텍스트 완료, 음성 대기
+
+    spy = PublishSpy()
+    await run(conn, session_id, publish=spy, delivery_count=3, audio_enabled=True)
+
+    row = await report_row(conn, session_id)
+    assert row["status"] == "PROCESSING"  # 포기 대상이 아니다 — 완성은 음성 쪽 몫
+    assert spy.events == []
+
+
+@pytest.mark.asyncio
 async def test_신규_경로는_진행중_로우에_양보하고_회수_경로는_재개한다(conn):
     session_id = await seed_ready_session(conn)
     failing = FakeEvaluator(fail_on=frozenset({1}))
@@ -216,7 +262,7 @@ async def test_신규_경로는_진행중_로우에_양보하고_회수_경로�
     assert spy.events == []
     assert (await report_row(conn, session_id))["text_analyzed_at"] is None
 
-    await run(conn, session_id, publish=spy, is_reclaimed=True)  # 회수 경로 → 재개
+    await run(conn, session_id, publish=spy, is_reclaimed=True, audio_enabled=True)  # 회수 경로 → 재개
     row = await report_row(conn, session_id)
     assert row["text_analyzed_at"] is not None  # 완주
     assert spy.statuses() == []  # 재개는 PROCESSING 재발행 없음 (음성 대기라 COMPLETED 도 없음)

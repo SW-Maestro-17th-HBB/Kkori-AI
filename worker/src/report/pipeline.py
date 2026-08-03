@@ -4,16 +4,17 @@
 모든 의존(커넥션·평가기·상태 발행)은 인자로 받아 테스트에서 갈아끼운다 (이력서 선례).
 
 흐름 (백엔드 PRD 리포트 §2·§5):
-1. 포기 규칙 — 전달 횟수 임계 도달 시 FAILED 확정 + ACK
-2. 멱등 판단 — 종결 스킵 / 텍스트 완료면 완성 판정만 재시도
+1. 멱등 판단 — 종결 스킵 / 텍스트 완료면 완성 판정만 재시도 (포기 검사보다 먼저 —
+   확정만 남은 리포트를 FAILED 로 종결하지 않기 위해)
+2. 포기 규칙 — 전달 횟수 임계 도달 시 FAILED 확정 + ACK
 3. 유령 방어 — 대본·세션 없으면 로우 생성 전에 스킵 (쓰레기 PENDING 방지)
 4. 로우 확보 — 리포트+Job 한 트랜잭션 생성, 유니크 충돌은 양보
 5. PROCESSING 진입 — CAS. 신규 경로에서 이미 PROCESSING 이면 양보,
    회수 경로면 죽은 처리자의 몫을 이어받아 재개(전이 없이 진행)
 6. 평가 — 주제(본질문+꼬리)별 LLM 호출, 내부 재시도(지수 백오프)
 7. 총평 + 집계(평균·태그 상위 3 — 결정적 코드)
-8. 저장 — 산출물 일괄 + text_analyzed_at (한 트랜잭션)
-9. 완성 판정 — 음성까지 끝났으면 COMPLETED + 발행 (아니면 음성 쪽이 나중에 판정)
+8~9. 저장 + 완성 판정 — 한 트랜잭션 (산출물 저장과 상태 전이는 같은 트랜잭션).
+   음성 경로가 켜져 있고 음성 미완이면 판정은 통과되지 않고 음성 쪽이 나중에 확정한다.
 """
 
 from __future__ import annotations
@@ -87,22 +88,27 @@ async def process_generation_request(
     sid = request.sessionId
     report = await get_report_by_session(conn, sid)
 
-    # 1. 포기 규칙: 임계 도달 시 재처리 없이 FAILED 확정 → 정상 반환(=ACK).
-    #    이 순서 고정 — 도중에 죽어도 재전달본이 같은 경로로 수렴한다(mark_failed 멱등).
+    if report is not None:
+        uid = report["user_id"]
+        # 1a. 종결 상태 = at-least-once 중복 → 스킵, 이벤트 재발행 없음
+        if report["status"] in _TERMINAL:
+            return
+        # 1b. 텍스트는 끝났고 완성 판정 직전에 죽은 재전달 → 평가 없이 판정만 재시도.
+        #     포기 검사보다 먼저 온다 — 확정(싼 UPDATE 하나)만 남은 리포트를 임계 도달
+        #     배달이 FAILED 로 종결하는 일을 막는다 (리뷰 반영). 이 분기는 항상 ACK 로
+        #     끝나 무한 재시도가 불가능하므로 포기 규칙의 보호 대상이 아니다.
+        if report["text_analyzed_at"] is not None:
+            if await try_complete(
+                conn, report["id"], require_audio=settings.audio_analysis_enabled
+            ):
+                await publish(report["id"], uid, ReportStatus.COMPLETED, "")
+            return
+
+    # 2. 포기 규칙: 임계 도달 시 재처리 없이 FAILED 확정 → 정상 반환(=ACK).
+    #    도중에 죽어도 재전달본이 같은 경로로 수렴한다(mark_failed 멱등).
     if delivery_count >= settings.delivery_count_threshold:
         await _give_up(conn, report, publish, delivery_count)
         return
-
-    if report is not None:
-        uid = report["user_id"]
-        # 2a. 종결 상태 = at-least-once 중복 → 스킵, 이벤트 재발행 없음
-        if report["status"] in _TERMINAL:
-            return
-        # 2b. 텍스트는 끝났고 완성 판정 직전에 죽은 재전달 → 평가 없이 판정만 재시도
-        if report["text_analyzed_at"] is not None:
-            if await try_complete(conn, report["id"]):
-                await publish(report["id"], uid, ReportStatus.COMPLETED, "")
-            return
 
     # 3. 유령 방어 — 로우를 만들기 전에 걸러 쓰레기 PENDING 을 남기지 않는다.
     #    (계약상 대본 저장 → 요청 발행 순서이므로, 대본 없음은 유령이지 타이밍이 아니다)
@@ -159,18 +165,26 @@ async def process_generation_request(
         conn=conn, report_id=report_id, settings=settings,
     )
 
-    # 8. 집계(결정적 코드) + 일괄 저장
-    await save_text_results(
-        conn,
-        report_id,
-        scores=aggregate_scores(evaluated),
-        feedbacks=[_to_feedback(a) for a in evaluated],
-        summary=summary,
-        tag_summary=aggregate_tag_summary(evaluated),
-    )
-
-    # 9. 완성 판정 — 음성도 끝나 있으면 나중에 끝난 이쪽이 COMPLETED 를 확정한다
-    if await try_complete(conn, report_id):
+    # 8~9. 집계(결정적 코드) + 일괄 저장 + 완성 판정을 한 트랜잭션으로 — "산출물은
+    #      저장됐는데 미완성"인 중간 상태를 남기지 않는다(산출물 저장과 상태 전이는 같은
+    #      트랜잭션 — 이력서 §2.4 불변식과 동일, 리뷰 반영). 안쪽 save_text_results 의
+    #      트랜잭션은 저장점으로 흡수된다. 음성 분석 경로가 켜져 있으면 판정은 둘 다
+    #      끝났을 때만 통과(나중에 끝난 쪽이 확정), 꺼져 있으면(도입 전) 텍스트만으로
+    #      즉시 완성한다 — 전달력 빈 값, overall 은 3축 평균.
+    async with conn.transaction():
+        await save_text_results(
+            conn,
+            report_id,
+            scores=aggregate_scores(evaluated),
+            feedbacks=[_to_feedback(a) for a in evaluated],
+            summary=summary,
+            tag_summary=aggregate_tag_summary(evaluated),
+        )
+        completed = await try_complete(
+            conn, report_id, require_audio=settings.audio_analysis_enabled
+        )
+    # 발행은 커밋 성공 후에만 — 커밋 전 발행은 롤백 시 존재하지 않는 상태를 알리게 된다
+    if completed:
         await publish(report_id, uid, ReportStatus.COMPLETED, "")
 
 
