@@ -35,7 +35,8 @@ docker build -f worker/Dockerfile -t kkori-worker .
 
 ## 기술적 결정사항
 
-- **worker 는 파이프라인(도메인)별 독립 프로세스** — 한 코드베이스(worker/)지만 이력서(`src.main:app`)와 리포트(`src.report.main:app`)를 별개 앱으로 실행한다. 리포트는 LLM 의존이 크고 배포가 잦아 장애·배포를 격리하기 위함. 리포트 코드는 `src/report/` 도메인 패키지에 모으고, 공유는 `contract/`·`ai/`·`config.py` 같은 라이브러리 계층뿐. 회수·발행 모듈은 이력서 계약에 묶여 있어 리포트 몫을 복제했다 — 셋째 도메인이 생기면 공용화 검토
+- **worker 는 파이프라인(도메인)별 독립 프로세스** — 한 코드베이스(worker/)지만 이력서(`src.main:app`)와 리포트(`src.report.main:app`)를 별개 앱으로 실행한다. 리포트는 LLM 의존이 크고 배포가 잦아 장애·배포를 격리하기 위함. 리포트 코드는 `src/report/` 도메인 패키지에 모으고, 공유는 `contract/`·`ai/`·`config.py`·`messaging/pel.py` 같은 라이브러리 계층뿐. 발행 모듈은 계약이 도메인 소유라 각자 두지만, 계약에 안 묶이는 PEL 조회는 공용이다
+- **방치 메시지 회수는 도메인마다 전용 구독자** — `StreamSub` 에 `min_idle_time` 을 주면 XREADGROUP 대신 XAUTOCLAIM 을 도는 회수 전용 모드가 되어 한 구독자가 새 메시지와 회수를 겸할 수 없다(실측). 그래서 각 워커가 구독자 둘을 등록하고, 회수 쪽은 `ack_policy=MANUAL` 로 ACK 을 직접 가른다 — 형식 위반은 제거(ACK)하고 처리 실패는 PEL 에 남겨야 해서. 폴링 간격(`reclaim_poll_interval_ms`)이 복구 지연을 정한다: 최악 = `claim_min_idle_ms` + 폴링 간격
 - **서비스별 독립 uv 프로젝트 (워크스페이스 아님)** — 두 서비스는 상호 import 없이 독립 배포되므로 단일 락파일 워크스페이스 대신 서비스마다 자체 pyproject.toml·uv.lock을 둔다(서비스 간 잠금 결합 제거, 팀원 간 작업 충돌 방지). 각 Dockerfile이 자기 락파일로 `uv sync --locked --no-dev` 후 소스 복사. pyproject에 build-system 없이 `[tool.uv] package = false`로 의존성만 설치(현행 `src/` 레이아웃 유지)
 - **livekit-agents + LiveKit Inference(STT·TTS) + Bedrock(LLM)** — STT·TTS·VAD는 LiveKit Cloud Inference, LLM은 `livekit-plugins-aws`(`aws.LLM`, Converse Stream)로 Bedrock Claude를 사용(worker와 동일 AWS 계정). 리전은 서울 + `global.` 크로스리전 프로파일(2026-07-31 실호출 탐침 — 서울은 global만 제공, 도쿄 jp.는 SCP 명시 거부, 지연은 us-east-1과 동급). 모델 구성은 `agent/src/config.py` 상수로, 교체 시 상수만 변경. 전환기 한정 `KKORI_LLM_PROVIDER=inference` 토글로 구 LiveKit Inference LLM 경로 병행(안정화 후 토글·inference LLM 경로 제거 예정, 팩토리는 `src/llm_factory.py`)
 - **Orchestrator 구조화 출력은 강제 tool 호출** — `response_format`은 프로바이더 공통 지원이 아니어서(Bedrock Converse 미지원), 판단 스키마를 tool 파라미터로 강제하고(`tool_choice`로 해당 tool 지정) 인자 JSON을 파싱한다. 실패는 기존과 동일하게 폴백 수렴
