@@ -167,13 +167,24 @@ async def test_상태_발행은_네이티브_필드로_나간다(redis):
 
 
 async def _run_subscriber(sub, seconds: float) -> None:
-    """구독자 하나만 잠깐 띄운다 — 앱 전체 기동은 DB 스키마·평가기 준비가 필요해 무겁다."""
+    """구독자 하나만 잠깐 띄운다 — 앱 전체 기동은 DB 스키마·평가기 준비가 필요해 무겁다.
+
+    브로커는 모듈 전역이라 앞 테스트의 이벤트 루프에 묶인 커넥션이 남는다. pytest-asyncio 는
+    테스트마다 새 루프를 만들므로, 매번 끊고 다시 연결해야 "attached to a different loop" 가
+    나지 않는다.
+    """
+    with contextlib.suppress(Exception):
+        await report_main.broker.stop()
     await report_main.broker.connect()
     task = asyncio.create_task(sub.start())
-    await asyncio.sleep(seconds)
-    task.cancel()
-    with contextlib.suppress(BaseException):
-        await task
+    try:
+        await asyncio.sleep(seconds)
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        with contextlib.suppress(Exception):
+            await report_main.broker.stop()
 
 
 def _subscribers():
@@ -225,3 +236,27 @@ async def test_구독자_배선_회수구독자는_새메시지를_읽지_않는
 
     await _run_subscriber(fresh_sub, 1.5)
     assert await last_delivered() != "0-0", "새 메시지 구독자는 읽어야 한다"
+
+
+@pytest.mark.asyncio
+async def test_구독자_배선_처리실패시_ACK안하고_PEL에_남는다(conn, redis, wired, monkeypatch):
+    """AckPolicy.MANUAL 의 핵심 — 실패했는데 프레임워크가 대신 ACK 하면 안 된다.
+
+    ack_policy 를 빼면 기본값(REJECT_ON_ERROR)으로 돌아가는데, 이 테스트가 그 회귀를 잡는다.
+    """
+    reclaim_sub, _ = _subscribers()
+    monkeypatch.setattr(reclaim_sub, "min_idle_time", 0)
+
+    session_id, _ = await seed_session(conn)
+    await seed_transcript(conn, session_id, UTTERANCES)
+    await dead_worker_takes(redis, ReportGenerationRequested(sessionId=session_id).encode())
+    assert (await redis.xpending(STREAM, GROUP))["pending"] == 1
+
+    async def broken(*args, **kwargs):
+        raise RuntimeError("일시 장애")
+
+    monkeypatch.setattr(report_main, "process_generation_request", broken)
+
+    await _run_subscriber(reclaim_sub, 2.0)
+
+    assert (await redis.xpending(STREAM, GROUP))["pending"] == 1, "처리 실패 메시지가 ACK 되면 안 된다"
