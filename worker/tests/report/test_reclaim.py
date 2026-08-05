@@ -252,11 +252,16 @@ async def test_구독자_배선_처리실패시_ACK안하고_PEL에_남는다(co
     await dead_worker_takes(redis, ReportGenerationRequested(sessionId=session_id).encode())
     assert (await redis.xpending(STREAM, GROUP))["pending"] == 1
 
+    # 구독자가 아예 안 돌아도 PEL 은 1로 남으므로, 실패 경로를 정말 탔는지 표시를 남긴다
+    called = asyncio.Event()
+
     async def broken(*args, **kwargs):
+        called.set()
         raise RuntimeError("일시 장애")
 
     monkeypatch.setattr(report_main, "process_generation_request", broken)
 
     await _run_subscriber(reclaim_sub, 2.0)
 
+    assert called.is_set(), "회수 구독자가 메시지를 처리 함수까지 전달해야 한다"
     assert (await redis.xpending(STREAM, GROUP))["pending"] == 1, "처리 실패 메시지가 ACK 되면 안 된다"

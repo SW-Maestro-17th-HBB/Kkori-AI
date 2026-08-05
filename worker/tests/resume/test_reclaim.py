@@ -280,11 +280,16 @@ async def test_구독자_배선_처리실패시_ACK안하고_PEL에_남는다(co
     await _simulate_dead_worker(redis, rid)
     assert await _pending_count(redis) == 1
 
+    # 구독자가 아예 안 돌아도 PEL 은 1로 남으므로, 실패 경로를 정말 탔는지 표시를 남긴다
+    called = asyncio.Event()
+
     async def broken(*args, **kwargs):
+        called.set()
         raise ConnectionError("일시 오류")
 
     monkeypatch.setattr(main, "process_request", broken)
 
     await _run_subscriber(reclaim_sub, 2.0)
 
+    assert called.is_set(), "회수 구독자가 메시지를 처리 함수까지 전달해야 한다"
     assert await _pending_count(redis) == 1, "처리 실패 메시지가 ACK 되면 안 된다"
