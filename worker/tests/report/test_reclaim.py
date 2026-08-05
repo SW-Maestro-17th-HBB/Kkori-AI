@@ -8,6 +8,9 @@
 `report.main.reclaim_one` 에 그대로 넘겨 처리 규칙만 확인한다.
 """
 
+import asyncio
+import contextlib
+
 import pytest
 import pytest_asyncio
 import redis.asyncio as aioredis
@@ -156,3 +159,69 @@ async def test_상태_발행은_네이티브_필드로_나간다(redis):
     }
     # 계약 왕복 — Spring 쪽 파싱과 같은 형태로 읽힌다
     assert ReportStatusChanged.decode(decoded).status is ReportStatus.PROCESSING
+
+
+# --- 구독 배관 통합 검증 ---------------------------------------------------
+# 위 테스트들은 reclaim_one 을 직접 호출하므로 구독자 배선(StreamSub 라우팅·AckPolicy·
+# 커넥션 주입)은 타지 않는다. 이력서 워커에서 그 사각지대에 주입 타입 오류가 났었다.
+
+
+async def _run_subscriber(sub, seconds: float) -> None:
+    """구독자 하나만 잠깐 띄운다 — 앱 전체 기동은 DB 스키마·평가기 준비가 필요해 무겁다."""
+    await report_main.broker.connect()
+    task = asyncio.create_task(sub.start())
+    await asyncio.sleep(seconds)
+    task.cancel()
+    with contextlib.suppress(BaseException):
+        await task
+
+
+def _subscribers():
+    subs = report_main.broker._subscribers
+    reclaim = [s for s in subs if s.stream_sub.min_idle_time is not None]
+    fresh = [s for s in subs if s.stream_sub.min_idle_time is None]
+    assert len(reclaim) == 1 and len(fresh) == 1, "구독자는 회수용·새 메시지용 하나씩이어야 한다"
+    return reclaim[0], fresh[0]
+
+
+@pytest.mark.asyncio
+async def test_구독자_배선_회수구독자가_방치메시지를_제거한다(redis, monkeypatch):
+    """StreamSub(min_idle_time) 라우팅·AckPolicy.MANUAL·커넥션 주입이 실제로 맞물리는지.
+
+    형식 위반 메시지를 쓰는 이유는 DB·평가기 없이도 끝까지 도달하기 때문이다
+    (decode 실패 → 로그 → ACK).
+    """
+    reclaim_sub, _ = _subscribers()
+    monkeypatch.setattr(reclaim_sub, "min_idle_time", 0)  # 즉시 회수 대상으로
+
+    await dead_worker_takes(redis, {"garbage": "x"})
+    assert (await redis.xpending(STREAM, GROUP))["pending"] == 1
+
+    await _run_subscriber(reclaim_sub, 2.0)
+
+    assert (await redis.xpending(STREAM, GROUP))["pending"] == 0  # 구독자가 회수해 제거
+    consumers = {c["name"].decode() for c in await redis.xinfo_consumers(STREAM, GROUP)}
+    assert report_main.settings.reclaim_consumer_name in consumers
+
+
+@pytest.mark.asyncio
+async def test_구독자_배선_회수구독자는_새메시지를_읽지_않는다(redis, monkeypatch):
+    """min_idle_time 을 준 구독자는 XAUTOCLAIM 만 돈다 — 새 메시지는 PEL 에 없어 못 읽는다.
+
+    FastStream 공식 문서에는 한 구독자가 둘 다 한다는 예시가 있으나 구현과 어긋난다
+    (프로젝트 이슈 #2848·#2927). 구독자를 합치면 새 메시지가 조용히 안 읽히므로 고정한다.
+    """
+    reclaim_sub, fresh_sub = _subscribers()
+    monkeypatch.setattr(reclaim_sub, "min_idle_time", 0)
+
+    await redis.xadd(STREAM, {"garbage": "x"})
+
+    async def last_delivered() -> str:
+        return (await redis.xinfo_groups(STREAM))[0]["last-delivered-id"].decode()
+
+    assert await last_delivered() == "0-0"
+    await _run_subscriber(reclaim_sub, 1.5)
+    assert await last_delivered() == "0-0", "회수 구독자가 새 메시지를 읽으면 안 된다"
+
+    await _run_subscriber(fresh_sub, 1.5)
+    assert await last_delivered() != "0-0", "새 메시지 구독자는 읽어야 한다"
