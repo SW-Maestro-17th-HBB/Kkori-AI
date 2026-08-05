@@ -19,6 +19,7 @@ from redis.asyncio import Redis
 
 from faststream import AckPolicy, FastStream
 from faststream.redis import RedisBroker, RedisStreamMessage, StreamSub
+from faststream.redis.annotations import Redis as InjectedRedis  # Context 주입용 애노테이션
 
 from src.config import Settings, get_settings
 from src.contract import ReportGenerationRequested, ReportStatus
@@ -170,8 +171,12 @@ async def reclaim_one(redis: Redis, message_id: bytes, fields: dict) -> None:
     ),
     ack_policy=AckPolicy.MANUAL,
 )
-async def handle_reclaimed(msg: RedisStreamMessage, redis: Redis) -> None:
-    """회수 구독자 — 배선만 하고 처리는 `reclaim_one` 이 한다."""
+async def handle_reclaimed(msg: RedisStreamMessage, redis: InjectedRedis) -> None:
+    """회수 구독자 — 배선만 하고 처리는 `reclaim_one` 이 한다.
+
+    `redis` 는 FastStream 이 Context 로 넣어주는 커넥션이다. `redis.asyncio.Redis` 를
+    그대로 힌트로 쓰면 주입되지 않고 검증 오류가 난다.
+    """
     message_ids = msg.raw_message.get("message_ids") or []
     if not message_ids:  # 회수 경로는 항상 한 건씩 오지만 방어적으로
         return
