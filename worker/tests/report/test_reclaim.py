@@ -1,19 +1,20 @@
 """리포트 회수·상태 발행 테스트 — 실제 Redis + 실제 DB (이력서 test_reclaim 과 같은 방식).
 
 시나리오: 다른 소비자("죽은 워커")가 메시지를 가져간 뒤 ACK 없이 사라짐
-→ reclaim_pending_once 가 회수해 재처리·XACK 하는지, 형식 위반 메시지를 제거하는지,
+→ 회수 구독자가 XAUTOCLAIM 으로 가져와 재처리·XACK 하는지, 형식 위반 메시지를 제거하는지,
 상태 발행이 Spring 이 읽는 네이티브 필드로 나가는지 검증.
+
+회수 구독자의 배관(폴링·커서)은 FastStream 몫이라, 테스트는 실제 XAUTOCLAIM 결과를
+`report.main.reclaim_one` 에 그대로 넘겨 처리 규칙만 확인한다.
 """
 
 import pytest
 import pytest_asyncio
 import redis.asyncio as aioredis
 
-from src.config import Settings
+import src.report.main as report_main
 from src.contract import ReportGenerationRequested, ReportStatus, ReportStatusChanged
 from src.report.evaluator import FakeEvaluator
-from src.report.pipeline import process_generation_request
-from src.report.reclaim import reclaim_pending_once
 from src.report.streams import publish_status
 from tests.conftest import requires_postgres, seed_session, seed_transcript
 from tests.report.test_pipeline import UTTERANCES
@@ -57,12 +58,12 @@ async def redis():
     await r.aclose()
 
 
-def reclaim_settings(dsn: str) -> Settings:
-    return Settings(
-        postgres_dsn=dsn,
-        claim_min_idle_ms=0,  # 테스트에선 즉시 방치로 판정
-        retry_base_delay_s=0.0,
-    )
+@pytest.fixture
+def wired(conn, monkeypatch):
+    """report.main 모듈의 자원·설정을 테스트용으로 배선."""
+    monkeypatch.setattr(report_main._Resources, "db", conn)
+    monkeypatch.setattr(report_main._Resources, "evaluator", FakeEvaluator())
+    monkeypatch.setattr(report_main.settings, "retry_base_delay_s", 0.0)
 
 
 async def dead_worker_takes(redis, fields: dict) -> None:
@@ -71,25 +72,35 @@ async def dead_worker_takes(redis, fields: dict) -> None:
     await redis.xreadgroup(GROUP, "dead-worker", {STREAM: ">"}, count=10)
 
 
+async def _reclaim_all(redis, limit: int = 10) -> int:
+    """구독자가 하는 일을 그대로 재현 — XAUTOCLAIM 으로 가져와 한 건씩 처리한다."""
+    processed = 0
+    for _ in range(limit):
+        _cursor, messages, _deleted = await redis.xautoclaim(
+            name=STREAM,
+            groupname=GROUP,
+            consumername=report_main.settings.reclaim_consumer_name,
+            min_idle_time=0,  # 테스트는 즉시 회수
+            count=1,
+        )
+        if not messages:
+            break
+        message_id, fields = messages[0]
+        await report_main.reclaim_one(redis, message_id, fields)
+        processed += 1
+    return processed
+
+
 @pytest.mark.asyncio
-async def test_방치_메시지를_회수해_재처리하고_ACK한다(conn, redis):
+async def test_방치_메시지를_회수해_재처리하고_ACK한다(conn, redis, wired):
     session_id, _ = await seed_session(conn)
     await seed_transcript(conn, session_id, UTTERANCES)
     await dead_worker_takes(
         redis, ReportGenerationRequested(sessionId=session_id).encode()
     )
-    settings = reclaim_settings(str(conn.info.dsn))
 
-    async def process(request, delivery_count):
-        await process_generation_request(
-            request, conn=conn, evaluator=FakeEvaluator(),
-            publish=lambda *a: publish_status(redis, *a),
-            settings=settings, delivery_count=delivery_count, is_reclaimed=True,
-        )
+    assert await _reclaim_all(redis) == 1
 
-    processed = await reclaim_pending_once(redis, settings=settings, process=process)
-
-    assert processed == 1
     cur = await conn.execute(
         "SELECT text_analyzed_at FROM reports WHERE interview_session_id = %s", (session_id,)
     )
@@ -99,37 +110,37 @@ async def test_방치_메시지를_회수해_재처리하고_ACK한다(conn, red
 
 
 @pytest.mark.asyncio
-async def test_형식_위반_메시지는_제거된다(conn, redis):
+async def test_형식_위반_메시지는_제거된다(conn, redis, wired, monkeypatch):
     await dead_worker_takes(redis, {"garbage": "x"})  # sessionId 없는 깨진 메시지
-    settings = reclaim_settings(str(conn.info.dsn))
 
-    async def process(request, delivery_count):
+    async def never(*args, **kwargs):
         raise AssertionError("형식 위반 메시지가 처리 함수까지 오면 안 된다")
 
-    processed = await reclaim_pending_once(redis, settings=settings, process=process)
+    monkeypatch.setattr(report_main, "process_generation_request", never)
 
-    assert processed == 0
+    await _reclaim_all(redis)
+
     summary = await redis.xpending(STREAM, GROUP)
     assert summary["pending"] == 0  # 재회수 반복 없이 제거(ACK)됨
 
 
 @pytest.mark.asyncio
-async def test_재처리_실패_메시지는_PEL에_남는다(conn, redis):
+async def test_재처리_실패_메시지는_PEL에_남는다(conn, redis, wired, monkeypatch):
     session_id, _ = await seed_session(conn)
     await seed_transcript(conn, session_id, UTTERANCES)
     await dead_worker_takes(
         redis, ReportGenerationRequested(sessionId=session_id).encode()
     )
-    settings = reclaim_settings(str(conn.info.dsn))
 
-    async def process(request, delivery_count):
+    async def broken(*args, **kwargs):
         raise RuntimeError("일시 장애")
 
-    processed = await reclaim_pending_once(redis, settings=settings, process=process)
+    monkeypatch.setattr(report_main, "process_generation_request", broken)
 
-    assert processed == 0
+    await _reclaim_all(redis, limit=1)
+
     summary = await redis.xpending(STREAM, GROUP)
-    assert summary["pending"] == 1  # ACK 안 됨 — 다음 주기에 다시 회수
+    assert summary["pending"] == 1  # ACK 안 됨 — 다음 폴링에 다시 회수
 
 
 @pytest.mark.asyncio

@@ -72,9 +72,6 @@ class Settings(BaseSettings):
     # min_idle 이 5분이라 지연 하한은 어차피 5분이므로, 더 촘촘히 돌려도 얻는 게 없고
     # XAUTOCLAIM 호출량만 늘어난다(100ms 면 하루 86만 회, 5s 면 1.7만 회).
     reclaim_poll_interval_ms: int = 5_000
-    # 아래 둘은 리포트 워커의 직접 루프 전용 — 그쪽도 구독자로 옮기면 제거한다.
-    reclaim_interval_s: int = 300  # 회수 루프 주기(5분)
-    reclaim_batch_size: int = 10  # 한 번의 XAUTOCLAIM 으로 가져올 최대 메시지 수
     retry_max_attempts: int = 3  # 외부 호출(S3·LLM·임베딩) 내부 재시도 최대 시도 수 (§9)
     retry_base_delay_s: float = 1.0  # 지수 백오프 시작 간격 — 1s → 2s → 4s
 
