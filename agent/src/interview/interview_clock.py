@@ -6,8 +6,11 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable
+
+logger = logging.getLogger(__name__)
 
 
 class InterviewClock:
@@ -33,6 +36,23 @@ class InterviewClock:
         """candidate 입장 관측 시점에 호출 — 재호출은 무시한다(최초 관측 유지)."""
         if self._started_at is None:
             self._started_at = self._monotonic()
+
+    def start_with_elapsed(self, elapsed_seconds: float) -> None:
+        """복원 시작 — 내구 저장된 시작 시각에서 역산한 경과를 주입한다.
+
+        docs/prd/interview-recovery.md §2: 경과 = 현재 벽시계 − startedAt.
+        음수 경과(미래 startedAt — 벽시계 역행·오염)는 0으로 clamp한다 —
+        면접이 길어지는 방향의 오류만 차단한다. 재호출은 무시(최초 관측 유지).
+        """
+        if self._started_at is not None:
+            return
+        if elapsed_seconds < 0:
+            logger.warning(
+                "복원 경과가 음수(%.1fs) — 0으로 clamp(startedAt 오염 의심)",
+                elapsed_seconds,
+            )
+            elapsed_seconds = 0.0
+        self._started_at = self._monotonic() - elapsed_seconds
 
     def elapsed_seconds(self) -> float:
         if self._started_at is None:

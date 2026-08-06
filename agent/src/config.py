@@ -48,6 +48,10 @@ INTERVIEW_DURATION_SECONDS = 30 * 60  # THIRTY_MIN 총 면접 시간
 WRAP_UP_REMAINING_SECONDS = 5 * 60  # soft — 남은 시간이 이하로 내려가면 마무리 단계 진입
 HARD_OVERRUN_GRACE_SECONDS = 3 * 60  # hard — 예정 종료 초과 유예, 소진 시 코드 강제 클로징
 
+# 면접 재연결·복원 — docs/prd/interview-recovery.md
+RECONNECT_WINDOW_SECONDS = 180  # 재연결 창 — Spring과 단일 계약값(재입장 토큰 TTL ≤ 창), 수렴 판정 주체는 agent
+RESUME_NOTICE = "연결이 복구되었습니다. 면접을 이어가겠습니다."  # 재개 안내 — 검수 고정 문구(transcript 미커밋)
+
 # 세션 정리·퇴장 — docs/prd/interview-end.md §3
 INTERVIEW_END_TOPIC = "interview:end"  # 사용자 종료 SendData topic — Spring 계약 확정
 END_STEP_TIMEOUT_SECONDS = 10  # 종료 시퀀스 외부 호출(DB·Redis·LiveKit) 단계별 타임아웃

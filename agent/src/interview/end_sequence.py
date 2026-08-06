@@ -39,6 +39,7 @@ class EndSequence:
         purge_fn: Callable[[], Awaitable[None]] | None = None,  # Redis 사본 DEL
         publish_fn: Callable[[], Awaitable[None]] | None = None,  # 리포트 요청 발행
         delete_room_fn: Callable[[], Awaitable[None]] | None = None,  # 룸 삭제 1회 시도
+        guard_fn: Callable[[], Awaitable[bool]] | None = None,  # owner 확인 — 완화 계층
         step_timeout_seconds: float = END_STEP_TIMEOUT_SECONDS,
         room_delete_max_attempts: int = ROOM_DELETE_MAX_ATTEMPTS,
         room_delete_backoff_seconds: float = ROOM_DELETE_RETRY_BACKOFF_SECONDS,
@@ -49,6 +50,7 @@ class EndSequence:
         self._purge_fn = purge_fn
         self._publish_fn = publish_fn
         self._delete_room_fn = delete_room_fn
+        self._guard_fn = guard_fn
         self._step_timeout = step_timeout_seconds
         self._room_delete_attempts = room_delete_max_attempts
         self._room_delete_backoff = room_delete_backoff_seconds
@@ -56,14 +58,37 @@ class EndSequence:
     async def run(self, cause: EndCause) -> None:
         logger.info("종료 시퀀스 시작 — 원인=%s", cause)
         await self._finalize_log()
-        flush_ok = await self._flush()
-        if flush_ok:
-            await self._purge_redis()
-            await self._publish_report_request()
+        if cause is EndCause.RECONNECT_TIMEOUT:
+            # 시간이 남은 창 소진 — 면접 미완주. flush 생략이 곧 신호다:
+            # 룸 삭제 → room_finished + 행 없음 → Spring ABORTED. Redis 상태는
+            # purge하지 않고 TTL 소멸(purge ⇔ flush 성공 불변식, recovery §1)
+            logger.info("재연결 창 소진 — flush·발행 생략(행 없음 → ABORTED 수렴)")
         else:
-            logger.warning("flush 미완료 — Redis 사본 보존, 리포트 발행 생략")
+            flush_ok = await self._flush()
+            if flush_ok:
+                await self._purge_redis()
+                await self._publish_report_request()
+            else:
+                logger.warning("flush 미완료 — Redis 사본 보존, 리포트 발행 생략")
         await self._delete_room()
         self._shutdown_fn(f"interview end: {cause}")
+
+    async def _allowed(self, step: str) -> bool:
+        """종결 단계 직전 owner 확인 — 다른 잡 관측 시에만 생략(완화 계층).
+
+        부재·조회 실패는 통과다. 원자성 없음(TOCTOU 감수) — 안전 보장은
+        Spring dispatch 단일성 계약이다 (docs/prd/interview-recovery.md §2).
+        """
+        if self._guard_fn is None:
+            return True
+        try:
+            allowed = await asyncio.wait_for(self._guard_fn(), self._step_timeout)
+        except Exception as exc:
+            logger.warning("owner 확인 실패(%s) — 통과 처리", type(exc).__name__)
+            return True
+        if not allowed:
+            logger.warning("owner 불일치 — %s 생략(후발 잡이 세션의 주인)", step)
+        return allowed
 
     async def _finalize_log(self) -> None:
         """신규 커밋은 종료 국면이 이미 차단했다 — writer만 drain·종료한다."""
@@ -80,6 +105,8 @@ class EndSequence:
         if self._flush_fn is None:
             logger.warning("transcript flush 미구현(HBB1-287) — 생략")
             return False
+        if not await self._allowed("flush"):
+            return False
         try:
             return await asyncio.wait_for(self._flush_fn(), self._step_timeout)
         except Exception as exc:
@@ -91,6 +118,8 @@ class EndSequence:
 
     async def _purge_redis(self) -> None:
         if self._purge_fn is None:
+            return
+        if not await self._allowed("Redis 정리"):
             return
         try:
             await asyncio.wait_for(self._purge_fn(), self._step_timeout)
@@ -114,6 +143,8 @@ class EndSequence:
         transcript 행 판별 계약으로 재dispatch를 막는다(PRD §3)."""
         if self._delete_room_fn is None:
             logger.warning("룸 삭제 생략(로컬·콘솔 — LiveKit 정리 대상 없음)")
+            return
+        if not await self._allowed("룸 삭제"):
             return
         for attempt in range(1, self._room_delete_attempts + 1):
             try:

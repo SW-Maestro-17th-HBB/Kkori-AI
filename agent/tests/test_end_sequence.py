@@ -148,3 +148,74 @@ def test_local_run_without_room_delete_still_exits():
     asyncio.run(seq.run(EndCause.USER_REQUEST))
     assert rec.events == []  # 로컬·콘솔 — 정리 대상 없이 퇴장만
     assert rec.shutdowns == ["interview end: USER_REQUEST"]
+
+
+# --- 재연결·복원 (docs/prd/interview-recovery.md) ---
+
+def test_reconnect_timeout_skips_flush_and_purge_but_deletes_room():
+    rec = _Recorder()
+    seq = _sequence(
+        rec,
+        writer=rec.writer(),
+        flush_fn=rec.step("flush", result=True),
+        purge_fn=rec.step("purge"),
+        publish_fn=rec.step("publish"),
+        delete_room_fn=rec.step("delete"),
+    )
+    asyncio.run(seq.run(EndCause.RECONNECT_TIMEOUT))
+    # 창 소진 = 면접 미완주 — flush 생략이 곧 ABORTED 신호(행 없음), 사본은 TTL 소멸
+    assert rec.events == ["writer", "delete"]
+    assert rec.shutdowns == ["interview end: RECONNECT_TIMEOUT"]
+
+
+def test_recovered_closing_runs_full_flush_sequence():
+    rec = _Recorder()
+    seq = _sequence(
+        rec,
+        writer=rec.writer(),
+        flush_fn=rec.step("flush", result=True),
+        purge_fn=rec.step("purge"),
+        publish_fn=rec.step("publish"),
+        delete_room_fn=rec.step("delete"),
+    )
+    asyncio.run(seq.run(EndCause.RECOVERED_CLOSING))
+    # 복원된 closing — 미완이던 종료 시퀀스를 flush부터 재개해 ENDED로 수렴한다
+    assert rec.events == ["writer", "flush", "purge", "publish", "delete"]
+
+
+def test_owner_mismatch_skips_terminal_steps_but_still_exits():
+    rec = _Recorder()
+
+    async def guard():
+        return False  # 다른 잡의 식별자 관측 — 후발 잡이 세션의 주인
+
+    seq = _sequence(
+        rec,
+        writer=rec.writer(),
+        flush_fn=rec.step("flush", result=True),
+        purge_fn=rec.step("purge"),
+        publish_fn=rec.step("publish"),
+        delete_room_fn=rec.step("delete"),
+        guard_fn=guard,
+    )
+    asyncio.run(seq.run(EndCause.FINAL_QUESTION))
+    assert rec.events == ["writer"]  # flush·정리·룸 삭제 생략 — 잡만 종료
+    assert rec.shutdowns == ["interview end: FINAL_QUESTION"]
+
+
+def test_owner_check_failure_passes_through():
+    rec = _Recorder()
+
+    async def guard():
+        raise RuntimeError("redis down")  # 조회 실패 — 통과(부재=통과 원칙)
+
+    seq = _sequence(
+        rec,
+        flush_fn=rec.step("flush", result=True),
+        purge_fn=rec.step("purge"),
+        publish_fn=rec.step("publish"),
+        delete_room_fn=rec.step("delete"),
+        guard_fn=guard,
+    )
+    asyncio.run(seq.run(EndCause.FINAL_QUESTION))
+    assert rec.events == ["flush", "purge", "publish", "delete"]
