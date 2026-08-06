@@ -23,6 +23,7 @@ from src.interview.conversation_log import (
     ConversationLog,
     FollowUpType,
     QuestionType,
+    Speaker,
     Utterance,
 )
 from src.interview.end_state import EndCause, EndPhase, EndState
@@ -69,6 +70,7 @@ class TurnPipeline:
         interview_clock: InterviewClock | None = None,
         cleanup_fn: Callable[[EndCause], Awaitable[None]] | None = None,
         marker_fn: Callable[[EndCause], Awaitable[object]] | None = None,
+        listener_present_fn: Callable[[], bool] | None = None,
     ) -> None:
         self._log = log
         self._orchestrator_fn = orchestrator_fn
@@ -82,6 +84,9 @@ class TurnPipeline:
         self._interview_clock = interview_clock
         self._cleanup_fn = cleanup_fn
         self._marker_fn = marker_fn  # 종료 표식 기록 — CLOSING 진입 부수효과 (§3)
+        # candidate 재실 여부 — 미주입(None)은 항상 재실(콘솔·로컬·기존 테스트 무영향)
+        self._listener_present_fn = listener_present_fn
+        self._force_topic_shift = False  # 복원 orphan 줄기 — 다음 판단 강제 전환 (recovery §2)
         self._closing_reason: str | None = None  # END가 Orchestrator 판단일 때만 존재
         self._turn_seq = 0
         self._tasks: set[asyncio.Task] = set()
@@ -109,6 +114,12 @@ class TurnPipeline:
             # CLOSING 진입 이후 발화는 어떤 경로에서도 커밋하지 않는다
             logger.info("종료 국면(%s) 중 발화 — 답변으로 처리하지 않음", phase.name)
             return
+        if not self._listener_present():
+            # 이탈 관측 이후 완료되는 user turn은 폐기한다 — 끊김에 잘린 부분
+            # 답변은 신뢰할 수 없는 증거다. 재입장 후 재낭독 앵커가 수렴한다
+            # (docs/prd/interview-recovery.md §1)
+            logger.info("candidate 이탈 후 완료된 발화 — 폐기")
+            return
         text = answer_text.strip()
         if not text:
             logger.warning("빈 답변 텍스트 — 턴 무시")
@@ -132,6 +143,76 @@ class TurnPipeline:
         self._commit(self._log.append_answer(text, self._clock()))
         self._turn_seq += 1
         self._spawn(self._run(self._turn_seq))
+
+    def _listener_present(self) -> bool:
+        return self._listener_present_fn is None or self._listener_present_fn()
+
+    # --- 재연결·복원 (docs/prd/interview-recovery.md) ---
+
+    def invalidate_inflight(self) -> None:
+        """이탈 관측 시 진행 중 질문 생성·발화 폐기 — 청자 없음(recovery §1).
+
+        턴 순번만 올린다(기존 무효화 메커니즘 재사용) — 커밋된 로그는 불변.
+        """
+        self._turn_seq += 1
+
+    def force_topic_shift(self) -> None:
+        """복원 orphan 줄기 — 다음 판단을 주제 전환으로 강제(recovery §2).
+
+        루트가 유실된 줄기에 FOLLOW_UP을 커밋하면 불변식 검사에서 실패하므로
+        코드 우선 결정으로 원천 차단한다.
+        """
+        self._force_topic_shift = True
+
+    async def resume_after_reconnect(self, notice: str) -> None:
+        """재입장·복원 재개 — 재개 안내 후 앵커(recovery §1·§2 확정 규칙).
+
+        재개 안내·재낭독은 transcript에 커밋하지 않는다(시스템 안내·중복 방지).
+        앵커: 마지막 발화가 미답변 질문이면 같은 질문 재낭독, 답변이면 일반
+        파이프라인으로 다음 질문 생성. WAITING_FINAL_ANSWER는 마지막 발화가
+        미답변 final 질문이므로 재낭독 경로로 자연 수렴한다.
+        """
+        if self._closed or self._end_state.phase >= EndPhase.CLOSING:
+            return
+        async with self._speech_lock:
+            if self._closed or self._end_state.phase >= EndPhase.CLOSING:
+                return
+            notice_result = await self._try_say(notice)
+            if not notice_result.ok:
+                # 안내는 재개의 전제가 아니다 — 실패해도 앵커로 진행한다
+                # (앵커 발화 실패가 기존 침묵 방치 금지 정책으로 수렴)
+                logger.warning("재개 안내 재생 실패 — 앵커로 진행")
+        utterances = self._log.utterances
+        last = utterances[-1] if utterances else None
+        if last is None:
+            # 빈 로그 재개는 초기 질문 경로가 담당한다(main) — 여기 도달은 방어
+            logger.warning("빈 로그 재개 — 앵커 없음(초기 질문 경로 담당)")
+            return
+        if last.speaker is Speaker.INTERVIEWER and last.question_number is not None:
+            await self._respeak_question(last.content)
+            return
+        # 마지막이 답변 — 일반 턴 파이프라인으로 다음 질문 생성
+        self._turn_seq += 1
+        self._spawn(self._run(self._turn_seq))
+
+    async def _respeak_question(self, text: str) -> None:
+        """미답변 질문 재낭독 — 발화만, 재커밋 없음(번호 미소모, recovery §1).
+
+        재생 실패는 기존 질문 재생 정책과 동일 — 1회 재시도, 소진 시 잡 종료
+        (침묵 방치 금지).
+        """
+        async with self._speech_lock:
+            if self._closed or self._end_state.phase >= EndPhase.CLOSING:
+                return
+            result = await self._try_say(text)
+            if not result.ok:
+                if self._closed or self._end_state.phase >= EndPhase.CLOSING:
+                    return
+                logger.warning("재낭독 재생 실패 — 같은 질문 처음부터 재시도")
+                result = await self._try_say(text)
+                if not result.ok:
+                    logger.error("재낭독 재시도 소진 — 세션 진행 불가, 잡을 종료한다")
+                    self._shutdown_fn("tts playout failure")
 
     # --- 종료 국면 (docs/prd/interview-end.md §1) ---
 
@@ -179,28 +260,38 @@ class TurnPipeline:
                 await self._marker_fn(cause)
             except Exception as exc:
                 logger.warning("종료 표식 기록 예외(%s) — 계속", type(exc).__name__)
-        text = random.choice(closing_statements_for(cause))
-        # 진행 중 발화(질문 재생)가 있으면 완료를 기다린 뒤 클로징을 재생한다 —
-        # 재생을 자르지 않는다(PRD §1 hard). lock을 기다리던 다른 발화 실행은
-        # stale 검사로 폐기된다.
-        async with self._speech_lock:
-            result = await self._try_say(text)
-            if not result.ok:
-                logger.warning("클로징 재생 실패 — 같은 문구 재시도")
-                result = await self._try_say(text)
-        if result.ok:
-            async with self._commit_lock:
-                self._commit(
-                    self._log.append_closing(
-                        text,
-                        result.started_at or self._clock(),
-                        reason=self._closing_reason,
-                    )
-                )
+        # 클로징 발화 생략 조건 (docs/prd/interview-recovery.md) — RECONNECT_TIMEOUT은
+        # 청자가 없고, RECOVERED_CLOSING은 클로징이 이미 재생·커밋된 세션이며,
+        # 그 외 원인도 candidate 부재(재연결 창 중 hard 등)면 발화 없이 진행한다.
+        skip_speech = cause in (
+            EndCause.RECONNECT_TIMEOUT,
+            EndCause.RECOVERED_CLOSING,
+        ) or not self._listener_present()
+        if skip_speech:
+            logger.info("클로징 발화 생략 — 원인=%s", cause)
         else:
-            # 재시도 소진 — 이미 종료 국면이라 침묵 방치가 아니며, 이 시점의 최우선
-            # 과제는 발화가 아니라 종료 시퀀스다. 재생 안 된 문구는 커밋하지 않는다.
-            logger.error("클로징 재생 소진 — 클로징 없이 종료 시퀀스 진행")
+            text = random.choice(closing_statements_for(cause))
+            # 진행 중 발화(질문 재생)가 있으면 완료를 기다린 뒤 클로징을 재생한다 —
+            # 재생을 자르지 않는다(PRD §1 hard). lock을 기다리던 다른 발화 실행은
+            # stale 검사로 폐기된다.
+            async with self._speech_lock:
+                result = await self._try_say(text)
+                if not result.ok:
+                    logger.warning("클로징 재생 실패 — 같은 문구 재시도")
+                    result = await self._try_say(text)
+            if result.ok:
+                async with self._commit_lock:
+                    self._commit(
+                        self._log.append_closing(
+                            text,
+                            result.started_at or self._clock(),
+                            reason=self._closing_reason,
+                        )
+                    )
+            else:
+                # 재시도 소진 — 이미 종료 국면이라 침묵 방치가 아니며, 이 시점의 최우선
+                # 과제는 발화가 아니라 종료 시퀀스다. 재생 안 된 문구는 커밋하지 않는다.
+                logger.error("클로징 재생 소진 — 클로징 없이 종료 시퀀스 진행")
         self._end_state.try_advance(EndPhase.CLEANING)
         if self._cleanup_fn is None:
             return
@@ -264,6 +355,15 @@ class TurnPipeline:
         NEXT_TOPIC 대신 FINAL_QUESTION으로 수렴한다(새 주제 금지).
         """
         wrap_up_minutes = self._wrap_up_minutes()
+        if self._force_topic_shift:
+            # 복원 orphan 줄기 — 루트 유실 줄기에 FOLLOW_UP을 이어붙이지 않는다
+            # (docs/prd/interview-recovery.md §2). 1회성 강제.
+            self._force_topic_shift = False
+            if wrap_up_minutes is not None:
+                logger.info("orphan 줄기 복원(마무리 단계) — FINAL_QUESTION 강제")
+                return forced_final_question()
+            logger.info("orphan 줄기 복원 — NEXT_TOPIC 강제")
+            return forced_next_topic()
         if not self._log.has_topic_or_followup_question():
             if wrap_up_minutes is not None:
                 # 첫 답변이 마무리 단계에서야 완료된 엣지 — 마무리 단계에 새 주제는

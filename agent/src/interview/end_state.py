@@ -30,6 +30,8 @@ class EndCause(StrEnum):
     LLM_END = "LLM_END"  # Orchestrator END 판단
     HARD_TIMEOUT = "HARD_TIMEOUT"  # hard 강제(안전망)
     USER_REQUEST = "USER_REQUEST"  # 사용자 명시 종료
+    RECONNECT_TIMEOUT = "RECONNECT_TIMEOUT"  # 재연결 창 소진 — flush 생략, ABORTED 수렴 (recovery §1)
+    RECOVERED_CLOSING = "RECOVERED_CLOSING"  # 복원된 closing — 재발화 없이 종료 시퀀스 재개 (recovery §2)
 
 
 class EndState:

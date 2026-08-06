@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -115,6 +116,31 @@ class Utterance:
         elif self.ref_question_number is not None:
             raise ValueError("ref_question_number는 CONSISTENCY에만 존재한다")
 
+    @classmethod
+    def from_json_dict(cls, data: dict) -> Utterance:
+        """to_json_dict의 역변환 — Redis 사본 복원용 (docs/prd/interview-recovery.md §2).
+
+        발화 단위 스키마 불변식은 생성자(__post_init__)가 그대로 검증한다 —
+        여기서 실패하면 "파싱 불가" 항목이다(재구성의 드롭 대상).
+        """
+        spoken_raw = data.get("spokenAt")
+        if not isinstance(spoken_raw, str):
+            raise ValueError("spokenAt 누락 또는 형식 오류")
+        spoken_at = datetime.fromisoformat(spoken_raw.replace("Z", "+00:00"))
+        question_type = data.get("questionType")
+        follow_up_type = data.get("followUpType")
+        return cls(
+            question_number=data.get("questionNumber"),
+            parent_question_number=data.get("parentQuestionNumber"),
+            speaker=Speaker(data["speaker"]),
+            content=data.get("content", ""),
+            spoken_at=spoken_at,
+            question_type=QuestionType(question_type) if question_type else None,
+            follow_up_type=FollowUpType(follow_up_type) if follow_up_type else None,
+            reason=data.get("reason"),
+            ref_question_number=data.get("refQuestionNumber"),
+        )
+
     def to_json_dict(self) -> dict:
         """camelCase 직렬화 — 해당 없는 필드는 키 자체를 생략한다."""
         data: dict = {}
@@ -143,6 +169,9 @@ class ConversationLog:
 
     def __init__(self) -> None:
         self._utterances: list[Utterance] = []
+        # 복원 재구성이 설정 — gap으로 마지막 질문이 유실돼도 관측된 최대 번호
+        # 이후부터 발번해 번호 충돌을 막는다 (docs/prd/interview-recovery.md §2)
+        self._number_floor = 0
 
     @property
     def utterances(self) -> tuple[Utterance, ...]:
@@ -224,7 +253,7 @@ class ConversationLog:
 
     def last_question_number(self) -> int:
         last = self._last_question()
-        return last.question_number if last else 0
+        return max(self._number_floor, last.question_number if last else 0)
 
     def current_root(self) -> int | None:
         last = self._last_question()
@@ -294,8 +323,48 @@ class ConversationLog:
             for u in self._utterances
         )
 
+    def has_valid_current_root(self) -> bool:
+        """현재 줄기 루트가 실존하는 루트 질문인지 — 복원 orphan 줄기 판정용.
+
+        gap으로 루트가 유실된 줄기에 FOLLOW_UP을 커밋하면 append_question의
+        루트 존재 검사에서 실패한다 — 복원 코드는 이 판정으로 다음 판단을
+        주제 전환으로 강제한다 (docs/prd/interview-recovery.md §2).
+        """
+        root = self.current_root()
+        if root is None:
+            return True  # 질문 없음 — 줄기 자체가 없다
+        root_question = self.question_for(root)
+        return root_question is not None and root_question.question_type in (
+            QuestionType.INITIAL,
+            QuestionType.TOPIC,
+        )
+
     def _last_question(self) -> Utterance | None:
         for u in reversed(self._utterances):
             if u.speaker is Speaker.INTERVIEWER and u.question_number is not None:
                 return u  # closing(번호 없음)은 질문이 아니다
         return None
+
+
+def rebuild_conversation_log(items: Iterable[dict]) -> tuple[ConversationLog, int]:
+    """Redis 사본의 관대한 재구성 — docs/prd/interview-recovery.md §2.
+
+    발화 단위 스키마 위반(파싱 불가)만 드롭하고 건수를 반환한다. 참조 무결성
+    위반(루트 유실 꼬리질문, 질문 유실 답변)은 보존한다 — 재구성 로그의 용도는
+    LLM 컨텍스트 재료와 flush 원본이고, 내용을 버리는 것보다 낫다. 번호 하한을
+    관측된 최대 questionNumber로 세워 이후 발번의 충돌을 막는다.
+    """
+    log = ConversationLog()
+    dropped = 0
+    for data in items:
+        try:
+            utterance = Utterance.from_json_dict(data)
+        except Exception:
+            dropped += 1
+            continue
+        log._utterances.append(utterance)  # 불변식 우회 — 복원 전용 관대한 경로
+    log._number_floor = max(
+        (u.question_number for u in log._utterances if u.question_number is not None),
+        default=0,
+    )
+    return log, dropped

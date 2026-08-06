@@ -165,7 +165,11 @@ CLOSING_STATEMENTS_TIME_UP = (
 
 def closing_statements_for(cause: EndCause) -> tuple[str, ...]:
     """종료 원인 → 클로징 문구 세트 — 일반형(FINAL_QUESTION·USER_REQUEST) /
-    시간 소진형(LLM_END·HARD_TIMEOUT). docs/prd/interview-end.md §2."""
+    시간 소진형(LLM_END·HARD_TIMEOUT). docs/prd/interview-end.md §2.
+
+    재연결·복원 원인(RECONNECT_TIMEOUT·RECOVERED_CLOSING)은 클로징을 발화하지
+    않으므로(docs/prd/interview-recovery.md) 세트 선택과 무관하다 — 방어 기본값 일반형.
+    """
     if cause in (EndCause.LLM_END, EndCause.HARD_TIMEOUT):
         return CLOSING_STATEMENTS_TIME_UP
     return CLOSING_STATEMENTS_GENERAL

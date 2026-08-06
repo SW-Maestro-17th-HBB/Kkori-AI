@@ -1,0 +1,266 @@
+"""파이프라인의 재연결·복원 동작 단위 테스트 — docs/prd/interview-recovery.md §1·§2.
+
+청자 게이트(이탈 후 완료 turn 폐기), 재개 앵커(재낭독 무커밋 / 다음 질문),
+클로징 발화 생략(창 소진·복원·부재), orphan 강제 전환을 검증한다.
+"""
+
+import asyncio
+from datetime import datetime, timezone
+from types import SimpleNamespace
+
+from src.interview.conversation_log import ConversationLog, QuestionType, Speaker
+from src.interview.end_state import EndCause, EndPhase
+from src.interview.question_generation import GeneratedQuestion
+from src.interview.turn_pipeline import SpeechResult, TurnPipeline
+
+NOW = datetime(2026, 8, 6, 9, 0, 0, tzinfo=timezone.utc)
+SPOKE_AT = datetime(2026, 8, 6, 9, 0, 7, tzinfo=timezone.utc)
+RESUME_NOTICE = "연결이 복구되었습니다. 면접을 이어가겠습니다."
+
+
+class _OrchSpy:
+    def __init__(self):
+        self.calls = 0
+
+    async def __call__(self, log, wrap_up_minutes=None):
+        self.calls += 1
+        from src.interview.orchestrator import forced_next_topic
+
+        return forced_next_topic()
+
+
+class _GenSpy:
+    async def __call__(self, decision, log):
+        return GeneratedQuestion(text="다음 질문입니다. 어떻게 생각하세요?", is_fallback=False)
+
+
+class _SaySpy:
+    def __init__(self):
+        self.calls: list[str] = []
+
+    async def __call__(self, text):
+        self.calls.append(text)
+        return SpeechResult(ok=True, started_at=SPOKE_AT)
+
+
+def _make(**kwargs):
+    env = SimpleNamespace(
+        log=ConversationLog(),
+        orch=_OrchSpy(),
+        gen=_GenSpy(),
+        say=_SaySpy(),
+        shutdowns=[],
+        cleanups=[],
+        markers=[],
+        present=True,
+    )
+
+    async def cleanup(cause):
+        env.cleanups.append(cause)
+
+    async def marker(cause):
+        env.markers.append(cause)
+
+    env.pipeline = TurnPipeline(
+        log=env.log,
+        orchestrator_fn=env.orch,
+        generate_fn=env.gen,
+        say_fn=env.say,
+        shutdown_fn=lambda reason: env.shutdowns.append(reason),
+        clock=lambda: NOW,
+        cleanup_fn=cleanup,
+        marker_fn=marker,
+        listener_present_fn=lambda: env.present,
+        **kwargs,
+    )
+    return env
+
+
+async def _drain(pipeline):
+    while pipeline._tasks:
+        await asyncio.gather(*list(pipeline._tasks), return_exceptions=True)
+
+
+async def _bootstrap(env):
+    """초기 질문 + 첫 답변 → 본론 topic 질문까지 진행한 상태."""
+    await env.pipeline.speak_initial("안녕하세요, 자기소개 부탁드립니다.")
+    env.pipeline.on_user_turn_completed("백엔드 지망입니다.")
+    await _drain(env.pipeline)
+
+
+# --- 청자 게이트 (recovery §1 입력 경계) ---
+
+def test_turn_completed_after_departure_is_discarded():
+    env = _make()
+
+    async def scenario():
+        await _bootstrap(env)
+        env.present = False  # 이탈 관측 — 이후 완료되는 turn은 폐기
+        before = len(env.log.utterances)
+        env.pipeline.on_user_turn_completed("끊기기 직전 잘린 부분 답변")
+        await _drain(env.pipeline)
+        return before
+
+    before = asyncio.run(scenario())
+    assert len(env.log.utterances) == before  # 커밋 없음
+    assert env.orch.calls == 0  # 파이프라인 미기동
+
+
+# --- 재개 앵커 (recovery §1 확정 규칙) ---
+
+def test_resume_respeaks_unanswered_question_without_commit():
+    env = _make()
+
+    async def scenario():
+        await _bootstrap(env)  # 마지막 발화 = 미답변 topic 질문
+        before = len(env.log.utterances)
+        await env.pipeline.resume_after_reconnect(RESUME_NOTICE)
+        await _drain(env.pipeline)
+        return before
+
+    before = asyncio.run(scenario())
+    question = env.log.utterances[-1].content
+    assert env.say.calls[-2:] == [RESUME_NOTICE, question]  # 안내 → 같은 질문 재낭독
+    assert len(env.log.utterances) == before  # 재커밋 없음 — 번호 미소모
+
+
+def test_resume_after_answer_generates_next_question():
+    env = _make()
+
+    async def scenario():
+        await env.pipeline.speak_initial("안녕하세요, 자기소개 부탁드립니다.")
+        env.log.append_answer("답변까지 마친 상태입니다.", NOW)  # 마지막 발화 = 답변
+        await env.pipeline.resume_after_reconnect(RESUME_NOTICE)
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    assert env.say.calls[1] == RESUME_NOTICE
+    last = env.log.utterances[-1]
+    assert last.speaker is Speaker.INTERVIEWER  # 일반 파이프라인 — 다음 질문 생성·커밋
+    assert last.question_type is QuestionType.TOPIC
+
+
+def test_resume_is_noop_after_closing():
+    env = _make()
+
+    async def scenario():
+        await _bootstrap(env)
+        env.pipeline.begin_closing(EndCause.USER_REQUEST)
+        await _drain(env.pipeline)
+        said = len(env.say.calls)
+        await env.pipeline.resume_after_reconnect(RESUME_NOTICE)
+        await _drain(env.pipeline)
+        return said
+
+    said = asyncio.run(scenario())
+    assert len(env.say.calls) == said  # 종료 국면 — 재개 없음(first-wins)
+
+
+def test_resume_in_waiting_final_answer_respeaks_final_and_commits_once():
+    env = _make()
+
+    async def scenario():
+        await env.pipeline.speak_initial("안녕하세요, 자기소개 부탁드립니다.")
+        env.log.append_answer("자기소개 답변입니다.", NOW)
+        env.log.append_question(
+            question_number=2,
+            parent_question_number=2,
+            question_type=QuestionType.FINAL,
+            content="마지막으로 하고 싶은 말씀 있으신가요?",
+            spoken_at=NOW,
+        )
+        # 복원: 마지막 발화가 미답변 final — 국면 복원 후 재개
+        env.pipeline.end_state.try_advance(EndPhase.WAITING_FINAL_ANSWER)
+        await env.pipeline.resume_after_reconnect(RESUME_NOTICE)
+        env.pipeline.on_user_turn_completed("마지막 어필입니다.")
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    assert env.say.calls[-2] == "마지막으로 하고 싶은 말씀 있으신가요?"  # final 재낭독
+    assert env.pipeline.end_state.cause is EndCause.FINAL_QUESTION  # 답변 1회 → 클로징
+    answers = [u for u in env.log.utterances if u.speaker is Speaker.CANDIDATE]
+    assert answers[-1].content == "마지막 어필입니다."
+    assert env.cleanups == [EndCause.FINAL_QUESTION]
+
+
+# --- 클로징 발화 생략 (recovery §1·§2) ---
+
+def test_reconnect_timeout_closing_skips_speech_but_marks_and_cleans():
+    env = _make()
+
+    async def scenario():
+        await _bootstrap(env)
+        env.present = False
+        said = len(env.say.calls)
+        env.pipeline.begin_closing(EndCause.RECONNECT_TIMEOUT)
+        await _drain(env.pipeline)
+        return said
+
+    said = asyncio.run(scenario())
+    assert len(env.say.calls) == said  # 클로징 발화 생략 — 청자 없음
+    assert all(u.question_type is not QuestionType.CLOSING for u in env.log.utterances)
+    assert env.markers == [EndCause.RECONNECT_TIMEOUT]  # 표식은 기록 — 재디스패치 차단
+    assert env.cleanups == [EndCause.RECONNECT_TIMEOUT]
+
+
+def test_recovered_closing_skips_speech_even_with_listener():
+    env = _make()
+
+    async def scenario():
+        env.pipeline.begin_closing(EndCause.RECOVERED_CLOSING)
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    assert env.say.calls == []  # 클로징은 이미 재생·커밋된 세션 — 재발화 없음
+    assert env.markers == [EndCause.RECOVERED_CLOSING]  # 표식 재기록 — 루프 차단
+    assert env.cleanups == [EndCause.RECOVERED_CLOSING]
+
+
+def test_hard_timeout_with_absent_candidate_skips_speech_but_cleans():
+    env = _make()
+
+    async def scenario():
+        await _bootstrap(env)
+        env.present = False  # 창 도중 hard 선소진 — 청자 없음
+        said = len(env.say.calls)
+        env.pipeline.begin_closing(EndCause.HARD_TIMEOUT)
+        await _drain(env.pipeline)
+        return said
+
+    said = asyncio.run(scenario())
+    assert len(env.say.calls) == said  # 발화만 생략 — flush 등 정상 종료는 end_sequence가 수행
+    assert env.cleanups == [EndCause.HARD_TIMEOUT]
+
+
+# --- orphan 줄기 강제 전환 (recovery §2) ---
+
+def test_force_topic_shift_skips_orchestrator_once():
+    env = _make()
+
+    async def scenario():
+        await _bootstrap(env)
+        env.pipeline.force_topic_shift()
+        env.pipeline.on_user_turn_completed("orphan 줄기의 답변입니다.")
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    assert env.orch.calls == 0  # 코드 우선 결정 — Orchestrator 미호출
+    last = env.log.utterances[-1]
+    assert last.question_type is QuestionType.TOPIC  # FOLLOW_UP 커밋 실패 원천 차단
+
+
+def test_invalidate_inflight_discards_pending_generation():
+    env = _make()
+
+    async def scenario():
+        await _bootstrap(env)
+        before = len(env.log.utterances)
+        env.pipeline.on_user_turn_completed("이탈 직전의 답변입니다.")
+        env.pipeline.invalidate_inflight()  # 이탈 관측 — 진행 중 실행 폐기
+        await _drain(env.pipeline)
+        return before
+
+    before = asyncio.run(scenario())
+    # 답변 커밋은 유지되지만(이탈 전 완료), 새 질문 발화·커밋은 폐기된다
+    assert len(env.log.utterances) == before + 1
+    assert env.log.utterances[-1].speaker is Speaker.CANDIDATE
