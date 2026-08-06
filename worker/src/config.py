@@ -66,10 +66,12 @@ class Settings(BaseSettings):
     consumer_name: str = ""  # 빈값이면 런타임에 hostname 사용(인스턴스 구분)
 
     # --- 재량 파라미터 (§9) ---
-    delivery_count_threshold: int = 3  # 초과 시 재처리 없이 FAILED (§4)
+    delivery_count_threshold: int = 3  # 이상이면 재처리 없이 FAILED (§4 — 판정은 >=)
     claim_min_idle_ms: int = 300_000  # XAUTOCLAIM 회수 대상 판정(5분)
-    reclaim_interval_s: int = 300  # 회수 루프 주기(5분) — 최악 복구 지연 = min_idle + 주기 ≤ 10분
-    reclaim_batch_size: int = 10  # 한 번의 XAUTOCLAIM 으로 가져올 최대 메시지 수
+    # 회수 구독자의 폴링 간격 — 최악 복구 지연 = min_idle + 이 값.
+    # min_idle 이 5분이라 지연 하한은 어차피 5분이므로, 더 촘촘히 돌려도 얻는 게 없고
+    # XAUTOCLAIM 호출량만 늘어난다(100ms 면 하루 86만 회, 5s 면 1.7만 회).
+    reclaim_poll_interval_ms: int = 5_000
     retry_max_attempts: int = 3  # 외부 호출(S3·LLM·임베딩) 내부 재시도 최대 시도 수 (§9)
     retry_base_delay_s: float = 1.0  # 지수 백오프 시작 간격 — 1s → 2s → 4s
 
@@ -82,6 +84,15 @@ class Settings(BaseSettings):
     def resolved_consumer_name(self) -> str:
         """consumer_name 이 비어 있으면 hostname 으로 대체."""
         return self.consumer_name or socket.gethostname()
+
+    @property
+    def reclaim_consumer_name(self) -> str:
+        """회수 구독자의 컨슈머 이름 — 새 메시지 구독자와 나눠 XINFO CONSUMERS 에서 구분한다.
+
+        같은 그룹 안에서 이름이 갈리므로 어느 쪽이 몇 건을 들고 있는지 따로 보인다.
+        두 워커(이력서·리포트)는 그룹이 달라 이름을 공유해도 부딪히지 않는다.
+        """
+        return f"{self.resolved_consumer_name}-reclaimer"
 
     @property
     def s3_endpoint(self) -> str | None:
