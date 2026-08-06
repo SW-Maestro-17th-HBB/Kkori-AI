@@ -62,6 +62,7 @@ def test_disconnect_starts_window_and_discards_inflight():
     assert env.monitor.is_present is False
     assert env.invalidations == 1  # 진행 중 생성·발화 폐기 — 청자 없음
     assert env.deadlines == [NOW + timedelta(seconds=3600)]  # 절대 deadline 내구 기록
+    assert env.monitor.last_disconnect_at == NOW.timestamp()  # 입력 경계 노출
     assert env.closings == []
 
 

@@ -64,10 +64,13 @@ class PresenceMonitor:
         return self._present
 
     @property
-    def epoch(self) -> int:
-        """connection epoch — 이탈 관측마다 증가. 이전 연결 구간에서 시작된
-        입력의 커밋 차단 재료(파이프라인 입력 경계, PRD §1)."""
-        return self._epoch
+    def last_disconnect_at(self) -> float | None:
+        """직전 candidate 이탈 관측 시각(unix 초) — 파이프라인 입력 경계(PRD §1).
+
+        이 시각보다 먼저 시작된 발화의 완료는 이전 연결의 입력이다. 재입장해도
+        지우지 않는다 — 경계는 "마지막 이탈"이고, 그 뒤에 시작된 입력만 유효하다.
+        """
+        return self._left_at.timestamp() if self._left_at is not None else None
 
     def on_participant_disconnected(self, identity: str) -> None:
         if self._closed:

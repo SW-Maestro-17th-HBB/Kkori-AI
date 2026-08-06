@@ -84,7 +84,12 @@ class InterviewerAgent(Agent):
     async def on_user_turn_completed(self, turn_ctx, new_message) -> None:
         # 훅은 답변 커밋·턴 순번 증가만 하고 즉시 반환한다 — 프레임워크가 이전 훅 완료를
         # 기다리므로, 파이프라인(판단→생성→발화)은 훅 밖의 독립 task로 실행된다.
-        self._pipeline.on_user_turn_completed(new_message.text_content or "")
+        # 발화 시작 시각(metrics)은 이탈 전 시작된 입력의 지연 완료 판정 재료 (recovery §1)
+        metrics = getattr(new_message, "metrics", None) or {}
+        self._pipeline.on_user_turn_completed(
+            new_message.text_content or "",
+            speech_started_at=metrics.get("started_speaking_at"),
+        )
 
 
 def _make_say_fn(session: AgentSession):
@@ -402,18 +407,14 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         cleanup_fn=end_sequence.run,
         marker_fn=on_marker if session_id else None,
         listener_present_fn=candidate_present,
-        # 이탈 전에 시작된 입력의 커밋 차단 재료 — monitor 무장 전(epoch 0 고정)은 무해
-        epoch_fn=lambda: monitor.epoch if monitor is not None else 0,
+        # 이탈 전에 시작된 입력의 지연 완료 차단 — 경계 = 직전 이탈 관측 시각.
+        # monitor 무장 전(이탈 관측 없음)은 경계 없음(None)이라 무해
+        input_boundary_fn=lambda: (
+            monitor.last_disconnect_at if monitor is not None else None
+        ),
     )
 
     monitor: PresenceMonitor | None = None
-
-    def on_user_state_changed(ev) -> None:
-        # 발화 시작 시점의 connection epoch 보존 — turn 완료 시 대조 (recovery §1)
-        if getattr(ev, "new_state", None) == "speaking":
-            pipeline.mark_user_speech_started()
-
-    session.on("user_state_changed", on_user_state_changed)
 
     async def cleanup() -> None:
         # entrypoint는 초기 발화 후 반환해도 세션은 계속 동작한다 —

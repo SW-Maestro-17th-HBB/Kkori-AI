@@ -71,7 +71,7 @@ class TurnPipeline:
         cleanup_fn: Callable[[EndCause], Awaitable[None]] | None = None,
         marker_fn: Callable[[EndCause], Awaitable[object]] | None = None,
         listener_present_fn: Callable[[], bool] | None = None,
-        epoch_fn: Callable[[], int] | None = None,
+        input_boundary_fn: Callable[[], float | None] | None = None,
     ) -> None:
         self._log = log
         self._orchestrator_fn = orchestrator_fn
@@ -87,12 +87,11 @@ class TurnPipeline:
         self._marker_fn = marker_fn  # 종료 표식 기록 — CLOSING 진입 부수효과 (§3)
         # candidate 재실 여부 — 미주입(None)은 항상 재실(콘솔·로컬·기존 테스트 무영향)
         self._listener_present_fn = listener_present_fn
-        # connection epoch — 발화 시작 시점의 epoch를 보존해, 이탈 전에 시작된
-        # 입력이 재입장 이후에 완료돼도 커밋되지 않게 한다 (recovery §1 입력 경계).
-        # 슬롯은 "마지막 완료 이후 최초 발화 시작"의 epoch를 담고 완료 시 소진된다 —
-        # 재입장 후 새 발화가 시작돼도 이전 연결의 시작 기록이 덮이지 않는다
-        self._epoch_fn = epoch_fn
-        self._input_epoch: int | None = None
+        # 입력 경계 — 직전 candidate 이탈 관측 시각(unix 초). turn 완료에 실려 오는
+        # 발화 시작 시각과 대조해, 이탈 전에 시작된 입력이 재입장 이후에 완료돼도
+        # 커밋되지 않게 한다 (recovery §1). 완료별 시작 시각이 근거라 별도의
+        # 시작 관측·페어링 상태가 없다
+        self._input_boundary_fn = input_boundary_fn
         self._force_topic_shift = False  # 복원 orphan 줄기 — 다음 판단 강제 전환 (recovery §2)
         self._closing_reason: str | None = None  # END가 Orchestrator 판단일 때만 존재
         self._turn_seq = 0
@@ -107,7 +106,9 @@ class TurnPipeline:
 
     # --- turn 훅 경로 (최소 작업 후 즉시 반환) ---
 
-    def on_user_turn_completed(self, answer_text: str) -> None:
+    def on_user_turn_completed(
+        self, answer_text: str, *, speech_started_at: float | None = None
+    ) -> None:
         """답변 커밋 + 턴 순번 증가 + 독립 task 시작. 훅은 여기서 끝난다.
 
         이 메서드는 await 없는 동기 실행이라 상태 확인→커밋→전이가 하나의
@@ -116,10 +117,6 @@ class TurnPipeline:
         """
         if self._closed:
             return
-        # 이 완료에 대응하는 발화 시작 epoch를 소진한다 — 어떤 경로로 버려지든
-        # 다음 완료가 이전 기록과 잘못 짝지어지지 않게 한다
-        input_epoch = self._input_epoch
-        self._input_epoch = None
         phase = self._end_state.phase
         if phase >= EndPhase.CLOSING:
             # CLOSING 진입 이후 발화는 어떤 경로에서도 커밋하지 않는다
@@ -131,15 +128,19 @@ class TurnPipeline:
             # (docs/prd/interview-recovery.md §1)
             logger.info("candidate 이탈 후 완료된 발화 — 폐기")
             return
+        boundary = (
+            self._input_boundary_fn() if self._input_boundary_fn is not None else None
+        )
         if (
-            self._epoch_fn is not None
-            and input_epoch is not None
-            and input_epoch != self._epoch_fn()
+            boundary is not None
+            and speech_started_at is not None
+            and speech_started_at < boundary
         ):
-            # 이탈 전에 시작된 입력이 재입장 후 늦게 완료된 경우 — 재실 검사만으로는
-            # 못 거른다. 발화 시작 epoch 미관측(None)은 재실 검사로 폴백한다(입력
-            # 전체가 드롭되는 오배선 위험 회피)
-            logger.info("이전 연결 구간에서 시작된 발화 — 폐기")
+            # 직전 이탈 관측보다 먼저 시작된 입력 — 끊김에 잘린 답변이 재입장 후
+            # 늦게 완료된 경우라 재실 검사만으로는 못 거른다. 완료 이벤트에 실린
+            # 발화 시작 시각으로 완료별 판정한다(시작 시각 부재는 재실 검사 폴백 —
+            # 프레임워크 미제공 상황이 입력 전체를 막지 않게)
+            logger.info("이탈 이전에 시작된 발화 — 폐기")
             return
         text = answer_text.strip()
         if not text:
@@ -169,21 +170,6 @@ class TurnPipeline:
         return self._listener_present_fn is None or self._listener_present_fn()
 
     # --- 재연결·복원 (docs/prd/interview-recovery.md) ---
-
-    def mark_user_speech_started(self) -> None:
-        """사용자 발화 시작 관측 — 그 시점의 connection epoch를 보존한다.
-
-        조립 코드가 user_state_changed(speaking) 이벤트에 배선한다. turn 완료
-        시점의 epoch와 대조해 이탈 전에 시작된 입력의 커밋을 차단한다.
-
-        최초 기록 우선(첫 발화 시작만 기록) — 이전 연결에서 시작된 입력의 완료가
-        도착하기 전에 재입장 후 새 발화가 시작돼도, 이전 시작 기록(구 epoch)이
-        덮이지 않아 지연 도착한 완료가 정확히 폐기된다. 남는 한계: 구 입력의
-        완료가 끝내 도착하지 않으면 새 발화 1회가 구 epoch로 오폐기될 수 있다 —
-        다음 발화부터 자기 치유되는 잔여 리스크로 감수한다.
-        """
-        if self._epoch_fn is not None and self._input_epoch is None:
-            self._input_epoch = self._epoch_fn()
 
     def invalidate_inflight(self) -> None:
         """이탈 관측 시 진행 중 질문 생성·발화 폐기 — 청자 없음(recovery §1).

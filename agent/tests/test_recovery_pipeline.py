@@ -266,39 +266,47 @@ def test_invalidate_inflight_discards_pending_generation():
     assert env.log.utterances[-1].speaker is Speaker.CANDIDATE
 
 
-# --- connection epoch 입력 경계 (리뷰 반영 — 이전 epoch 입력의 지연 도착) ---
+# --- 입력 경계 (리뷰 반영 — 이탈 전 시작된 입력의 지연 완료) ---
+# 경계 = 직전 이탈 관측 시각. 판정 근거는 turn 완료에 실려 오는 발화 시작 시각이다.
 
-def _make_with_epoch():
+DISCONNECT_AT = 1_000.0  # 직전 이탈 관측 시각(unix 초 — 테스트 고정값)
+
+
+def _make_with_boundary():
     env = _make()
-    env.epoch = 0
-    env.pipeline._epoch_fn = lambda: env.epoch
+    env.boundary = None  # 이탈 관측 전 — 경계 없음
+    env.pipeline._input_boundary_fn = lambda: env.boundary
     return env
 
 
-def test_answer_started_in_previous_epoch_is_discarded_after_reentry():
-    env = _make_with_epoch()
+def test_answer_started_before_disconnect_is_discarded_after_reentry():
+    env = _make_with_boundary()
 
     async def scenario():
         await _bootstrap(env)
-        env.pipeline.mark_user_speech_started()  # 발화 시작 관측 — epoch 0 보존
-        env.epoch = 1  # 이탈 → 재입장 (재실 상태로 되돌아옴)
+        env.boundary = DISCONNECT_AT  # 이탈 → 재입장 (재실 상태로 되돌아옴)
         before = len(env.log.utterances)
-        env.pipeline.on_user_turn_completed("끊기며 잘린 답변의 지연 완료")
+        env.pipeline.on_user_turn_completed(
+            "끊기며 잘린 답변의 지연 완료", speech_started_at=DISCONNECT_AT - 5
+        )
         await _drain(env.pipeline)
         return before
 
     before = asyncio.run(scenario())
-    assert len(env.log.utterances) == before  # 재실이어도 이전 epoch 입력은 폐기
+    assert len(env.log.utterances) == before  # 재실이어도 이탈 전 시작 입력은 폐기
 
 
-def test_answer_started_in_current_epoch_commits_normally():
-    env = _make_with_epoch()
+def test_answer_started_after_reentry_commits_even_if_old_never_completes():
+    """리뷰 지적 경합 — 이전 입력의 완료가 끝내 도착하지 않아도, 새 답변은
+    자기 시작 시각이 경계 이후라 즉시 커밋된다(페어링 상태 없음)."""
+    env = _make_with_boundary()
 
     async def scenario():
         await _bootstrap(env)
-        env.epoch = 1
-        env.pipeline.mark_user_speech_started()  # 재입장 후 새 발화 — epoch 1
-        env.pipeline.on_user_turn_completed("재입장 후의 정상 답변")
+        env.boundary = DISCONNECT_AT  # 이전 발화는 완료 없이 소실된 상황
+        env.pipeline.on_user_turn_completed(
+            "재입장 후의 정상 답변", speech_started_at=DISCONNECT_AT + 30
+        )
         await _drain(env.pipeline)
 
     asyncio.run(scenario())
@@ -306,18 +314,18 @@ def test_answer_started_in_current_epoch_commits_normally():
     assert answers[-1].content == "재입장 후의 정상 답변"
 
 
-def test_unobserved_speech_start_falls_back_to_presence_gate():
-    env = _make_with_epoch()
+def test_missing_speech_start_falls_back_to_presence_gate():
+    env = _make_with_boundary()
 
     async def scenario():
         await _bootstrap(env)
-        env.epoch = 1  # 발화 시작 미관측(mark 없음) — 재실 검사로만 판정
-        env.pipeline.on_user_turn_completed("epoch 미관측 답변")
+        env.boundary = DISCONNECT_AT  # 시작 시각 미제공 — 재실 검사로만 판정
+        env.pipeline.on_user_turn_completed("시작 시각 없는 답변")
         await _drain(env.pipeline)
 
     asyncio.run(scenario())
     answers = [u for u in env.log.utterances if u.speaker is Speaker.CANDIDATE]
-    assert answers[-1].content == "epoch 미관측 답변"  # 오배선이 입력 전체를 막지 않는다
+    assert answers[-1].content == "시작 시각 없는 답변"  # 미제공이 입력 전체를 막지 않는다
 
 
 # --- 재생 완료 후 커밋 직전 재검사 (리뷰 반영 — 빈 룸 재생 완료) ---
@@ -384,24 +392,26 @@ def test_final_question_finished_in_empty_room_skips_commit_and_transition():
 
 
 def test_stale_callback_after_new_speech_started_is_still_discarded():
-    """재입장 후 새 발화가 시작된 뒤에 이전 연결의 완료가 도착하는 경합 —
-    최초 기록 우선 + 완료 시 소진으로 이전 답변은 폐기되고 새 답변은 커밋된다."""
-    env = _make_with_epoch()
+    """재입장 후 새 발화가 진행 중일 때 이전 연결의 완료가 뒤늦게 도착하는 경합 —
+    완료별 시작 시각 판정이라 이전 답변만 폐기되고 새 답변은 커밋된다."""
+    env = _make_with_boundary()
 
     async def scenario():
         await _bootstrap(env)
-        env.pipeline.mark_user_speech_started()  # 이전 연결에서 발화 시작 — epoch 0
-        env.epoch = 1  # 이탈 → 재입장
-        env.pipeline.mark_user_speech_started()  # 새 발화 시작 — 최초 기록(0)은 안 덮인다
+        env.boundary = DISCONNECT_AT  # 이탈 → 재입장, 새 발화도 이미 시작된 상태
         before = len(env.log.utterances)
-        env.pipeline.on_user_turn_completed("이전 연결에서 잘린 답변의 지연 완료")
+        env.pipeline.on_user_turn_completed(
+            "이전 연결에서 잘린 답변의 지연 완료", speech_started_at=DISCONNECT_AT - 5
+        )
         await _drain(env.pipeline)
         dropped = len(env.log.utterances) == before
-        env.pipeline.on_user_turn_completed("재입장 후의 새 답변")
+        env.pipeline.on_user_turn_completed(
+            "재입장 후의 새 답변", speech_started_at=DISCONNECT_AT + 30
+        )
         await _drain(env.pipeline)
         return dropped
 
     dropped = asyncio.run(scenario())
-    assert dropped  # 이전 epoch 입력 폐기
+    assert dropped  # 이탈 전 시작 입력만 폐기
     answers = [u for u in env.log.utterances if u.speaker is Speaker.CANDIDATE]
-    assert answers[-1].content == "재입장 후의 새 답변"  # 소진 후 완료 — 재실 폴백 커밋
+    assert answers[-1].content == "재입장 후의 새 답변"
