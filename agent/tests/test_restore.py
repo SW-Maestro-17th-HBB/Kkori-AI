@@ -147,6 +147,26 @@ def test_mode_close_when_final_question_answered():
     assert plan.closing_cause is EndCause.FINAL_QUESTION
 
 
+def test_mode_uses_nearest_preceding_question_on_duplicate_numbers():
+    """중복 질문 번호(오염 사본) — 답변의 질문은 가장 가까운 선행 일치 질문이다.
+    첫 일치로 찾으면 과거 final이 최신 topic의 답변을 마무리 완료로 오판한다."""
+    plan = build_restore_plan(
+        _state(
+            [
+                _q(1, qtype="initial"),
+                _a(1),
+                _q(2, qtype="final", offset=10),
+                _a(2, offset=20),
+                _q(2, qtype="topic", offset=100),  # 중복 번호 — 최신 질문은 일반형
+                _a(2, offset=110),
+            ],
+            started_at=BASE,
+        ),
+        now=NOW,
+    )
+    assert plan.mode is ResumeMode.RUNNING  # CLOSE_FINAL_ANSWERED 오판 없음
+
+
 def test_mode_waiting_final_answer_when_final_unanswered():
     plan = build_restore_plan(
         _state([_q(1, qtype="initial"), _a(1), _q(2, qtype="final")], started_at=BASE),

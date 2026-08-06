@@ -92,7 +92,6 @@ class TurnPipeline:
         # 커밋되지 않게 한다 (recovery §1). 완료별 시작 시각이 근거라 별도의
         # 시작 관측·페어링 상태가 없다
         self._input_boundary_fn = input_boundary_fn
-        self._force_topic_shift = False  # 복원 orphan 줄기 — 다음 판단 강제 전환 (recovery §2)
         self._closing_reason: str | None = None  # END가 Orchestrator 판단일 때만 존재
         self._turn_seq = 0
         self._tasks: set[asyncio.Task] = set()
@@ -128,6 +127,9 @@ class TurnPipeline:
             # (docs/prd/interview-recovery.md §1)
             logger.info("candidate 이탈 후 완료된 발화 — 폐기")
             return
+        # 단위 정합: speech_started_at은 livekit-agents(1.6.6)가 time.time()으로
+        # 찍는 unix 초이고(프레임워크 내부에서 time.time()과의 차로 경과를 계산),
+        # boundary도 UTC 벽시계의 timestamp()라 같은 시계·단위다
         boundary = (
             self._input_boundary_fn() if self._input_boundary_fn is not None else None
         )
@@ -177,14 +179,6 @@ class TurnPipeline:
         턴 순번만 올린다(기존 무효화 메커니즘 재사용) — 커밋된 로그는 불변.
         """
         self._turn_seq += 1
-
-    def force_topic_shift(self) -> None:
-        """복원 orphan 줄기 — 다음 판단을 주제 전환으로 강제(recovery §2).
-
-        루트가 유실된 줄기에 FOLLOW_UP을 커밋하면 불변식 검사에서 실패하므로
-        코드 우선 결정으로 원천 차단한다.
-        """
-        self._force_topic_shift = True
 
     async def resume_after_reconnect(self, notice: str) -> None:
         """재입장·복원 재개 — 재개 안내 후 앵커(recovery §1·§2 확정 규칙).
@@ -377,14 +371,15 @@ class TurnPipeline:
         NEXT_TOPIC 대신 FINAL_QUESTION으로 수렴한다(새 주제 금지).
         """
         wrap_up_minutes = self._wrap_up_minutes()
-        if self._force_topic_shift:
-            # 복원 orphan 줄기 — 루트 유실 줄기에 FOLLOW_UP을 이어붙이지 않는다
-            # (docs/prd/interview-recovery.md §2). 1회성 강제.
-            self._force_topic_shift = False
+        if not self._log.has_valid_current_root():
+            # 복원 orphan 줄기 — 루트 유실 줄기에 FOLLOW_UP을 이어붙이면 커밋
+            # 불변식 검사에서 실패한다(docs/prd/interview-recovery.md §2). 소비형
+            # 플래그가 아니라 로그 관측이라, 강제된 실행이 폐기돼도 유효한 루트가
+            # 커밋될 때까지 판단마다 다시 강제된다(상태 소실 없음).
             if wrap_up_minutes is not None:
-                logger.info("orphan 줄기 복원(마무리 단계) — FINAL_QUESTION 강제")
+                logger.info("orphan 줄기(마무리 단계) — FINAL_QUESTION 강제")
                 return forced_final_question()
-            logger.info("orphan 줄기 복원 — NEXT_TOPIC 강제")
+            logger.info("orphan 줄기 — NEXT_TOPIC 강제")
             return forced_next_topic()
         if not self._log.has_topic_or_followup_question():
             if wrap_up_minutes is not None:

@@ -45,7 +45,7 @@ class _SaySpy:
 
 def _make(**kwargs):
     env = SimpleNamespace(
-        log=ConversationLog(),
+        log=kwargs.pop("log", ConversationLog()),
         orch=_OrchSpy(),
         gen=_GenSpy(),
         say=_SaySpy(),
@@ -234,19 +234,68 @@ def test_hard_timeout_with_absent_candidate_skips_speech_but_cleans():
 
 # --- orphan 줄기 강제 전환 (recovery §2) ---
 
-def test_force_topic_shift_skips_orchestrator_once():
-    env = _make()
+def _orphan_log():
+    """루트(2)가 유실된 꼬리질문(3)이 현재 줄기인 재구성 로그."""
+    from src.interview.conversation_log import rebuild_conversation_log
+
+    items = [
+        {
+            "questionNumber": 1, "parentQuestionNumber": 1,
+            "speaker": "INTERVIEWER", "questionType": "initial",
+            "content": "자기소개 부탁드립니다.", "spokenAt": "2026-08-06T09:00:00Z",
+        },
+        {
+            "questionNumber": 1, "parentQuestionNumber": 1,
+            "speaker": "CANDIDATE", "content": "답변입니다.",
+            "spokenAt": "2026-08-06T09:00:30Z",
+        },
+        {
+            "questionNumber": 3, "parentQuestionNumber": 2,
+            "speaker": "INTERVIEWER", "questionType": "followup",
+            "followUpType": "DEEPEN", "content": "orphan 꼬리질문입니다.",
+            "spokenAt": "2026-08-06T09:01:00Z",
+        },
+    ]
+    log, dropped = rebuild_conversation_log(items)
+    assert dropped == 0
+    return log
+
+
+def test_orphan_branch_forces_topic_shift_without_orchestrator():
+    env = _make(log=_orphan_log())
 
     async def scenario():
-        await _bootstrap(env)
-        env.pipeline.force_topic_shift()
-        env.pipeline.on_user_turn_completed("orphan 줄기의 답변입니다.")
+        env.pipeline.on_user_turn_completed("orphan 질문의 답변입니다.")
         await _drain(env.pipeline)
 
     asyncio.run(scenario())
     assert env.orch.calls == 0  # 코드 우선 결정 — Orchestrator 미호출
     last = env.log.utterances[-1]
     assert last.question_type is QuestionType.TOPIC  # FOLLOW_UP 커밋 실패 원천 차단
+
+
+def test_orphan_forcing_survives_discarded_execution():
+    """강제된 실행이 폐기(재생 중 이탈)돼도 다음 판단에서 다시 강제된다 —
+    소비형 플래그가 아니라 판단 시점의 로그 관측이므로 상태가 소실되지 않는다."""
+    env = _make(log=_orphan_log())
+    env.say = _LeavingSay(env, leave_on_call=1)  # 강제 전환 질문 재생 도중 이탈
+    env.pipeline._say_fn = env.say
+
+    async def scenario():
+        env.pipeline.on_user_turn_completed("orphan 질문의 답변입니다.")
+        await _drain(env.pipeline)  # 강제 topic 재생 완료 — 청자 부재로 커밋 폐기
+        discarded = all(
+            u.question_type is not QuestionType.TOPIC for u in env.log.utterances
+        )
+        env.present = True  # 재입장
+        env.pipeline.on_user_turn_completed("재입장 후의 답변입니다.")
+        await _drain(env.pipeline)
+        return discarded
+
+    discarded = asyncio.run(scenario())
+    assert discarded
+    assert env.orch.calls == 0  # 두 번째 판단도 다시 강제 — FOLLOW_UP 커밋 실패 없음
+    assert env.log.utterances[-1].question_type is QuestionType.TOPIC
 
 
 def test_invalidate_inflight_discards_pending_generation():

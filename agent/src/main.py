@@ -496,15 +496,13 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         if not candidate_present():
             monitor.on_participant_disconnected(candidate_identity)
 
-    # --- 국면·강제 전환 복원 — 발화 여부와 무관하게 먼저 세운다
+    # --- 국면 복원 — 발화 여부와 무관하게 먼저 세운다. orphan 줄기 강제 전환은
+    # 별도 상태가 아니라 파이프라인이 판단마다 로그에서 관측한다 (recovery §2)
     if restore_plan is not None and log.utterances:
         if restore_plan.mode is ResumeMode.WAITING_FINAL_ANSWER:
             # 마지막 발화가 미답변 final — 국면 복원(재개 앵커가 final을 재낭독하고,
             # 답변 1회 커밋 후 클로징으로 수렴한다 — 기존 커밋 정책 그대로)
             pipeline.end_state.try_advance(EndPhase.WAITING_FINAL_ANSWER)
-        if restore_plan.orphan_branch:
-            # 루트 유실 줄기 — 다음 판단을 주제 전환으로 강제 (recovery §2)
-            pipeline.force_topic_shift()
 
     # --- 재개/시작 발화 — 초기화 구간 이탈이 관측됐으면 연기한다: 빈 룸 발화는
     # 커밋 폐기로 유실될 뿐이다. 재입장 콜백(resume_interview)이 이어받는다

@@ -100,7 +100,18 @@ def _derive_mode(log: ConversationLog) -> tuple[ResumeMode, EndCause | None]:
         # 재기록해야 복원 flush까지 실패해도 재디스패치가 반복되지 않는다
         return ResumeMode.CLOSE_RECOVERED, EndCause.RECOVERED_CLOSING
     if last.speaker is Speaker.CANDIDATE and last.question_number is not None:
-        question = log.question_for(last.question_number)
+        # 답변의 질문은 가장 가까운 선행 일치 질문이다 — 관대 재구성은 중복 번호를
+        # 보존하므로, 첫 일치(question_for)를 쓰면 과거 final이 최신 일반 질문의
+        # 답변을 마무리 완료로 오판할 수 있다
+        question = next(
+            (
+                utterance
+                for utterance in reversed(utterances[:-1])
+                if utterance.speaker is Speaker.INTERVIEWER
+                and utterance.question_number == last.question_number
+            ),
+            None,
+        )
         if question is not None and question.question_type is QuestionType.FINAL:
             return ResumeMode.CLOSE_FINAL_ANSWERED, EndCause.FINAL_QUESTION
     if (

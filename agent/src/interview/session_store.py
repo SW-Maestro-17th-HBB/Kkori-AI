@@ -181,13 +181,21 @@ async def owner_allows(session_id: str, job_id: str) -> bool:
     return await _with_client(op, failure_log="owner 조회 실패 — 통과 처리", default=True)
 
 
+# 비교-삭제 원자 실행 — GET과 DEL 사이에 후발 잡이 SET(last-wins)하면 구 잡의
+# DEL이 새 owner까지 지워 가드가 사라진다(핸드오프 창의 경쟁). Lua로 봉합한다
+_COMPARE_AND_DELETE = """
+if redis.call("get", KEYS[1]) == ARGV[1] then
+    return redis.call("del", KEYS[1])
+end
+return 0
+"""
+
+
 async def release_owner(session_id: str, job_id: str) -> None:
-    """잡 종료 직전 자기 소유면 DEL — best-effort, 실패 시 TTL 소멸."""
+    """잡 종료 직전 자기 소유면 DEL — 원자 비교-삭제, 실패 시 TTL 소멸."""
 
     async def op(redis: Redis) -> None:
-        current = await redis.get(_owner_key(session_id))
-        if current == job_id:
-            await redis.delete(_owner_key(session_id))
+        await redis.eval(_COMPARE_AND_DELETE, 1, _owner_key(session_id), job_id)
 
     await _with_client(op, failure_log="owner 정리 실패 — TTL로 만료", default=None)
 
@@ -239,7 +247,9 @@ async def read_restore_state(session_id: str) -> RestoreState:
     """
 
     async def op(redis: Redis) -> RestoreState:
-        async with redis.pipeline(transaction=False) as pipe:
+        # MULTI/EXEC — 표식·메타·transcript가 같은 실행 순간의 스냅샷이 되게 한다
+        # (종료 표식 기록과 복원 조회가 교차하는 핸드오프 창의 찢김 방지)
+        async with redis.pipeline(transaction=True) as pipe:
             pipe.exists(_termination_key(session_id))
             pipe.hgetall(_meta_key(session_id))
             pipe.lrange(_transcript_key(session_id), 0, -1)
