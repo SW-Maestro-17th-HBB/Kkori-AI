@@ -88,7 +88,9 @@ class TurnPipeline:
         # candidate 재실 여부 — 미주입(None)은 항상 재실(콘솔·로컬·기존 테스트 무영향)
         self._listener_present_fn = listener_present_fn
         # connection epoch — 발화 시작 시점의 epoch를 보존해, 이탈 전에 시작된
-        # 입력이 재입장 이후에 완료돼도 커밋되지 않게 한다 (recovery §1 입력 경계)
+        # 입력이 재입장 이후에 완료돼도 커밋되지 않게 한다 (recovery §1 입력 경계).
+        # 슬롯은 "마지막 완료 이후 최초 발화 시작"의 epoch를 담고 완료 시 소진된다 —
+        # 재입장 후 새 발화가 시작돼도 이전 연결의 시작 기록이 덮이지 않는다
         self._epoch_fn = epoch_fn
         self._input_epoch: int | None = None
         self._force_topic_shift = False  # 복원 orphan 줄기 — 다음 판단 강제 전환 (recovery §2)
@@ -114,6 +116,10 @@ class TurnPipeline:
         """
         if self._closed:
             return
+        # 이 완료에 대응하는 발화 시작 epoch를 소진한다 — 어떤 경로로 버려지든
+        # 다음 완료가 이전 기록과 잘못 짝지어지지 않게 한다
+        input_epoch = self._input_epoch
+        self._input_epoch = None
         phase = self._end_state.phase
         if phase >= EndPhase.CLOSING:
             # CLOSING 진입 이후 발화는 어떤 경로에서도 커밋하지 않는다
@@ -127,8 +133,8 @@ class TurnPipeline:
             return
         if (
             self._epoch_fn is not None
-            and self._input_epoch is not None
-            and self._input_epoch != self._epoch_fn()
+            and input_epoch is not None
+            and input_epoch != self._epoch_fn()
         ):
             # 이탈 전에 시작된 입력이 재입장 후 늦게 완료된 경우 — 재실 검사만으로는
             # 못 거른다. 발화 시작 epoch 미관측(None)은 재실 검사로 폴백한다(입력
@@ -169,8 +175,14 @@ class TurnPipeline:
 
         조립 코드가 user_state_changed(speaking) 이벤트에 배선한다. turn 완료
         시점의 epoch와 대조해 이탈 전에 시작된 입력의 커밋을 차단한다.
+
+        최초 기록 우선(첫 발화 시작만 기록) — 이전 연결에서 시작된 입력의 완료가
+        도착하기 전에 재입장 후 새 발화가 시작돼도, 이전 시작 기록(구 epoch)이
+        덮이지 않아 지연 도착한 완료가 정확히 폐기된다. 남는 한계: 구 입력의
+        완료가 끝내 도착하지 않으면 새 발화 1회가 구 epoch로 오폐기될 수 있다 —
+        다음 발화부터 자기 치유되는 잔여 리스크로 감수한다.
         """
-        if self._epoch_fn is not None:
+        if self._epoch_fn is not None and self._input_epoch is None:
             self._input_epoch = self._epoch_fn()
 
     def invalidate_inflight(self) -> None:

@@ -381,3 +381,27 @@ def test_final_question_finished_in_empty_room_skips_commit_and_transition():
     assert all(
         u.question_type is not QuestionType.FINAL for u in env.log.utterances
     )  # final 미커밋 — 창 소진 또는 재입장 앵커가 수렴
+
+
+def test_stale_callback_after_new_speech_started_is_still_discarded():
+    """재입장 후 새 발화가 시작된 뒤에 이전 연결의 완료가 도착하는 경합 —
+    최초 기록 우선 + 완료 시 소진으로 이전 답변은 폐기되고 새 답변은 커밋된다."""
+    env = _make_with_epoch()
+
+    async def scenario():
+        await _bootstrap(env)
+        env.pipeline.mark_user_speech_started()  # 이전 연결에서 발화 시작 — epoch 0
+        env.epoch = 1  # 이탈 → 재입장
+        env.pipeline.mark_user_speech_started()  # 새 발화 시작 — 최초 기록(0)은 안 덮인다
+        before = len(env.log.utterances)
+        env.pipeline.on_user_turn_completed("이전 연결에서 잘린 답변의 지연 완료")
+        await _drain(env.pipeline)
+        dropped = len(env.log.utterances) == before
+        env.pipeline.on_user_turn_completed("재입장 후의 새 답변")
+        await _drain(env.pipeline)
+        return dropped
+
+    dropped = asyncio.run(scenario())
+    assert dropped  # 이전 epoch 입력 폐기
+    answers = [u for u in env.log.utterances if u.speaker is Speaker.CANDIDATE]
+    assert answers[-1].content == "재입장 후의 새 답변"  # 소진 후 완료 — 재실 폴백 커밋

@@ -452,13 +452,22 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             pipeline.begin_closing(EndCause.HARD_TIMEOUT)
         return
 
+    async def resume_interview() -> None:
+        # 재입장 재개 — 초기 질문조차 발화되지 못한 빈 로그(초기화 구간 이탈)는
+        # 신규와 같은 진행 경로로 초기 질문을 발화한다(재개 안내 없음). 빈 로그로
+        # 이 경로에 오는 잡은 항상 초기 질문을 선택해 둔 상태다
+        if log.utterances:
+            await pipeline.resume_after_reconnect(RESUME_NOTICE)
+        else:
+            await pipeline.speak_initial(initial_utterance(question))
+
     # --- 재연결 모니터 무장 + 이벤트 배선 — candidate 재실 상태에서만 (recovery §1)
     if not ctx.is_fake_job() and candidate_identity:
         monitor = PresenceMonitor(
             candidate_identity=candidate_identity,
             window_seconds=RECONNECT_WINDOW_SECONDS,
             begin_closing_fn=pipeline.begin_closing,
-            resume_fn=lambda: pipeline.resume_after_reconnect(RESUME_NOTICE),
+            resume_fn=resume_interview,
             invalidate_fn=pipeline.invalidate_inflight,
             record_deadline_fn=(
                 (lambda deadline: record_reconnect_deadline(session_id, deadline))
@@ -486,7 +495,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         if not candidate_present():
             monitor.on_participant_disconnected(candidate_identity)
 
-    # --- 재개/시작 발화
+    # --- 국면·강제 전환 복원 — 발화 여부와 무관하게 먼저 세운다
     if restore_plan is not None and log.utterances:
         if restore_plan.mode is ResumeMode.WAITING_FINAL_ANSWER:
             # 마지막 발화가 미답변 final — 국면 복원(재개 앵커가 final을 재낭독하고,
@@ -495,6 +504,12 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         if restore_plan.orphan_branch:
             # 루트 유실 줄기 — 다음 판단을 주제 전환으로 강제 (recovery §2)
             pipeline.force_topic_shift()
+
+    # --- 재개/시작 발화 — 초기화 구간 이탈이 관측됐으면 연기한다: 빈 룸 발화는
+    # 커밋 폐기로 유실될 뿐이다. 재입장 콜백(resume_interview)이 이어받는다
+    if not candidate_present():
+        logger.info("candidate 부재 — 시작·재개 발화 연기(재입장 시 수행)")
+    elif restore_plan is not None and log.utterances:
         await pipeline.resume_after_reconnect(RESUME_NOTICE)
     else:
         # 신규 세션 또는 transcript만 유실된 복원(빈 로그 = 신규와 같은 진행 경로)
