@@ -50,7 +50,10 @@ class PresenceMonitor:
         self._wall_clock = wall_clock
         self._present = True  # arm 시점 = candidate 재실
         self._left_at: datetime | None = None
-        self._epoch = 0  # 이탈 관측 횟수 — 관측·로그 재료
+        self._epoch = 0  # 이탈 관측 횟수 — 관측·로그 재료 + 입력 경계(epoch)
+        # deadline 기록·삭제는 발생 순서대로 직렬 실행한다 — 빠른 재입장 시
+        # 늦은 HSET이 HDEL 뒤에 실행돼 소진된 deadline을 되살리는 역전 차단
+        self._store_lock = asyncio.Lock()
         self._watch_task: asyncio.Task | None = None
         self._tasks: set[asyncio.Task] = set()
         self._closed = False
@@ -59,6 +62,12 @@ class PresenceMonitor:
     def is_present(self) -> bool:
         """candidate 재실 여부 — 파이프라인의 커밋·클로징 발화 게이트."""
         return self._present
+
+    @property
+    def epoch(self) -> int:
+        """connection epoch — 이탈 관측마다 증가. 이전 연결 구간에서 시작된
+        입력의 커밋 차단 재료(파이프라인 입력 경계, PRD §1)."""
+        return self._epoch
 
     def on_participant_disconnected(self, identity: str) -> None:
         if self._closed:
@@ -76,7 +85,7 @@ class PresenceMonitor:
         self._invalidate_fn()
         deadline = self._left_at + timedelta(seconds=self._window_seconds)
         if self._record_deadline_fn is not None:
-            self._spawn(self._record_deadline_fn(deadline))
+            self._spawn(self._serialized(self._record_deadline_fn(deadline)))
         self._cancel_watch()
         self._watch_task = asyncio.create_task(self._watch(deadline))
         logger.info(
@@ -102,7 +111,7 @@ class PresenceMonitor:
         )
         self._cancel_watch()
         if self._clear_deadline_fn is not None:
-            self._spawn(self._clear_deadline_fn())
+            self._spawn(self._serialized(self._clear_deadline_fn()))
         logger.info("candidate 재입장 — 부재 %.0f초, 면접 재개", absence)
         self._spawn(self._resume_fn())
 
@@ -123,6 +132,12 @@ class PresenceMonitor:
         )
         logger.warning("재연결 창 소진 — 종료 수렴 시도(원인=%s)", cause)
         self._begin_closing_fn(cause)
+
+    async def _serialized(self, op) -> None:
+        """deadline 저장소 작업의 FIFO 직렬 실행 — asyncio.Lock은 대기자를
+        선착순으로 깨우므로 spawn 순서 = 실행 순서다."""
+        async with self._store_lock:
+            await op
 
     def _cancel_watch(self) -> None:
         if self._watch_task is not None and not self._watch_task.done():

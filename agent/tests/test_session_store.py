@@ -205,3 +205,20 @@ def test_malformed_started_at_is_flagged_as_lost(session_id):
     state = asyncio.run(read_restore_state(session_id))
     assert state.started_at is None
     assert state.started_at_malformed is True  # 유실 취급 — 첫 발화 근사 폴백 층위로
+
+
+@requires_redis
+def test_clear_deadline_refreshes_meta_ttl(session_id):
+    import redis as sync_redis
+
+    client = sync_redis.Redis(host="localhost", port=6379)
+
+    async def scenario():
+        await init_session_meta(session_id, started_at=STARTED, candidate_identity="u")
+        await record_reconnect_deadline(session_id, DEADLINE)
+        client.expire(f"interview:{session_id}:meta", 5)  # TTL을 짧게 만든 뒤
+        await clear_reconnect_deadline(session_id)
+
+    asyncio.run(scenario())
+    # 삭제도 쓰기+EXPIRE 원자 실행 — HDEL만 하면 TTL이 갱신되지 않는다 (PRD §2)
+    assert client.ttl(f"interview:{session_id}:meta") > 5

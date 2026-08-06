@@ -137,7 +137,11 @@ async def clear_reconnect_deadline(session_id: str) -> bool:
     """재입장 시 deadline 삭제 — 창이 닫혔다."""
 
     async def op(redis: Redis) -> bool:
-        await redis.hdel(_meta_key(session_id), _META_RECONNECT_DEADLINE)
+        # 모든 메타 쓰기는 쓰기+EXPIRE 원자 실행 (PRD §2) — 삭제도 예외가 아니다
+        async with redis.pipeline(transaction=True) as pipe:
+            pipe.hdel(_meta_key(session_id), _META_RECONNECT_DEADLINE)
+            pipe.expire(_meta_key(session_id), REDIS_TRANSCRIPT_TTL_SECONDS)
+            await pipe.execute()
         return True
 
     return await _with_client(

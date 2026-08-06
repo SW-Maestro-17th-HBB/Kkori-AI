@@ -402,9 +402,18 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         cleanup_fn=end_sequence.run,
         marker_fn=on_marker if session_id else None,
         listener_present_fn=candidate_present,
+        # 이탈 전에 시작된 입력의 커밋 차단 재료 — monitor 무장 전(epoch 0 고정)은 무해
+        epoch_fn=lambda: monitor.epoch if monitor is not None else 0,
     )
 
     monitor: PresenceMonitor | None = None
+
+    def on_user_state_changed(ev) -> None:
+        # 발화 시작 시점의 connection epoch 보존 — turn 완료 시 대조 (recovery §1)
+        if getattr(ev, "new_state", None) == "speaking":
+            pipeline.mark_user_speech_started()
+
+    session.on("user_state_changed", on_user_state_changed)
 
     async def cleanup() -> None:
         # entrypoint는 초기 발화 후 반환해도 세션은 계속 동작한다 —
@@ -471,6 +480,11 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             "participant_connected",
             lambda p: monitor.on_participant_connected(p.identity),
         )
+        # 초기화 구간(입장 관측 → 리스너 등록 사이)의 퇴장 이벤트는 유실된다 —
+        # 무장 직후 룸 상태와 대조해 이미 이탈한 상태면 창을 즉시 시작한다.
+        # 리스너 등록 이후 확인이므로 이 사이 이벤트와 겹쳐도 멱등(no-op)이다
+        if not candidate_present():
+            monitor.on_participant_disconnected(candidate_identity)
 
     # --- 재개/시작 발화
     if restore_plan is not None and log.utterances:

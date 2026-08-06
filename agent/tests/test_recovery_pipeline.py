@@ -264,3 +264,120 @@ def test_invalidate_inflight_discards_pending_generation():
     # 답변 커밋은 유지되지만(이탈 전 완료), 새 질문 발화·커밋은 폐기된다
     assert len(env.log.utterances) == before + 1
     assert env.log.utterances[-1].speaker is Speaker.CANDIDATE
+
+
+# --- connection epoch 입력 경계 (리뷰 반영 — 이전 epoch 입력의 지연 도착) ---
+
+def _make_with_epoch():
+    env = _make()
+    env.epoch = 0
+    env.pipeline._epoch_fn = lambda: env.epoch
+    return env
+
+
+def test_answer_started_in_previous_epoch_is_discarded_after_reentry():
+    env = _make_with_epoch()
+
+    async def scenario():
+        await _bootstrap(env)
+        env.pipeline.mark_user_speech_started()  # 발화 시작 관측 — epoch 0 보존
+        env.epoch = 1  # 이탈 → 재입장 (재실 상태로 되돌아옴)
+        before = len(env.log.utterances)
+        env.pipeline.on_user_turn_completed("끊기며 잘린 답변의 지연 완료")
+        await _drain(env.pipeline)
+        return before
+
+    before = asyncio.run(scenario())
+    assert len(env.log.utterances) == before  # 재실이어도 이전 epoch 입력은 폐기
+
+
+def test_answer_started_in_current_epoch_commits_normally():
+    env = _make_with_epoch()
+
+    async def scenario():
+        await _bootstrap(env)
+        env.epoch = 1
+        env.pipeline.mark_user_speech_started()  # 재입장 후 새 발화 — epoch 1
+        env.pipeline.on_user_turn_completed("재입장 후의 정상 답변")
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    answers = [u for u in env.log.utterances if u.speaker is Speaker.CANDIDATE]
+    assert answers[-1].content == "재입장 후의 정상 답변"
+
+
+def test_unobserved_speech_start_falls_back_to_presence_gate():
+    env = _make_with_epoch()
+
+    async def scenario():
+        await _bootstrap(env)
+        env.epoch = 1  # 발화 시작 미관측(mark 없음) — 재실 검사로만 판정
+        env.pipeline.on_user_turn_completed("epoch 미관측 답변")
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    answers = [u for u in env.log.utterances if u.speaker is Speaker.CANDIDATE]
+    assert answers[-1].content == "epoch 미관측 답변"  # 오배선이 입력 전체를 막지 않는다
+
+
+# --- 재생 완료 후 커밋 직전 재검사 (리뷰 반영 — 빈 룸 재생 완료) ---
+
+class _LeavingSay:
+    """지정한 회차의 재생 도중 candidate가 이탈하는 say 스텁."""
+
+    def __init__(self, env, leave_on_call: int):
+        self.env = env
+        self.calls: list[str] = []
+        self._leave_on = leave_on_call
+
+    async def __call__(self, text):
+        self.calls.append(text)
+        if len(self.calls) == self._leave_on:
+            self.env.present = False  # 재생 중 이탈 — 빈 룸으로 재생은 완료된다
+        return SpeechResult(ok=True, started_at=SPOKE_AT)
+
+
+def test_question_finished_in_empty_room_is_not_committed():
+    env = _make()
+    env.say = _LeavingSay(env, leave_on_call=2)  # 2번째 재생(본론 질문) 도중 이탈
+    env.pipeline._say_fn = env.say
+
+    async def scenario():
+        await env.pipeline.speak_initial("안녕하세요, 자기소개 부탁드립니다.")
+        env.pipeline.on_user_turn_completed("자기소개 답변입니다.")
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    # 빈 룸에 재생을 마친 질문은 "실제 들은 발화"가 아니다 — 커밋 폐기
+    assert env.log.utterances[-1].speaker is Speaker.CANDIDATE
+    questions = [u for u in env.log.utterances if u.speaker is Speaker.INTERVIEWER]
+    assert len(questions) == 1  # 초기 질문뿐
+
+
+def test_final_question_finished_in_empty_room_skips_commit_and_transition():
+    from src.interview.conversation_log import Action
+    from src.interview.orchestrator import Decision, DecisionSource
+
+    env = _make()
+    env.say = _LeavingSay(env, leave_on_call=2)  # final 재생 도중 이탈
+    env.pipeline._say_fn = env.say
+
+    async def final_decision(log, wrap_up_minutes=None):
+        return Decision(
+            action=Action.FINAL_QUESTION,
+            source=DecisionSource.ORCHESTRATOR,
+            reason="마무리",
+        )
+
+    env.pipeline._orchestrator_fn = final_decision
+
+    async def scenario():
+        await _bootstrap(env)
+        env.pipeline.on_user_turn_completed("본론 답변입니다.")
+        await _drain(env.pipeline)
+
+    asyncio.run(scenario())
+    assert env.pipeline.end_state.phase is EndPhase.RUNNING  # WAITING 전이 없음
+    assert all(
+        u.question_type is not QuestionType.FINAL for u in env.log.utterances
+    )  # final 미커밋 — 창 소진 또는 재입장 앵커가 수렴

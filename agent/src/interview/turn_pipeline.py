@@ -71,6 +71,7 @@ class TurnPipeline:
         cleanup_fn: Callable[[EndCause], Awaitable[None]] | None = None,
         marker_fn: Callable[[EndCause], Awaitable[object]] | None = None,
         listener_present_fn: Callable[[], bool] | None = None,
+        epoch_fn: Callable[[], int] | None = None,
     ) -> None:
         self._log = log
         self._orchestrator_fn = orchestrator_fn
@@ -86,6 +87,10 @@ class TurnPipeline:
         self._marker_fn = marker_fn  # 종료 표식 기록 — CLOSING 진입 부수효과 (§3)
         # candidate 재실 여부 — 미주입(None)은 항상 재실(콘솔·로컬·기존 테스트 무영향)
         self._listener_present_fn = listener_present_fn
+        # connection epoch — 발화 시작 시점의 epoch를 보존해, 이탈 전에 시작된
+        # 입력이 재입장 이후에 완료돼도 커밋되지 않게 한다 (recovery §1 입력 경계)
+        self._epoch_fn = epoch_fn
+        self._input_epoch: int | None = None
         self._force_topic_shift = False  # 복원 orphan 줄기 — 다음 판단 강제 전환 (recovery §2)
         self._closing_reason: str | None = None  # END가 Orchestrator 판단일 때만 존재
         self._turn_seq = 0
@@ -120,6 +125,16 @@ class TurnPipeline:
             # (docs/prd/interview-recovery.md §1)
             logger.info("candidate 이탈 후 완료된 발화 — 폐기")
             return
+        if (
+            self._epoch_fn is not None
+            and self._input_epoch is not None
+            and self._input_epoch != self._epoch_fn()
+        ):
+            # 이탈 전에 시작된 입력이 재입장 후 늦게 완료된 경우 — 재실 검사만으로는
+            # 못 거른다. 발화 시작 epoch 미관측(None)은 재실 검사로 폴백한다(입력
+            # 전체가 드롭되는 오배선 위험 회피)
+            logger.info("이전 연결 구간에서 시작된 발화 — 폐기")
+            return
         text = answer_text.strip()
         if not text:
             logger.warning("빈 답변 텍스트 — 턴 무시")
@@ -148,6 +163,15 @@ class TurnPipeline:
         return self._listener_present_fn is None or self._listener_present_fn()
 
     # --- 재연결·복원 (docs/prd/interview-recovery.md) ---
+
+    def mark_user_speech_started(self) -> None:
+        """사용자 발화 시작 관측 — 그 시점의 connection epoch를 보존한다.
+
+        조립 코드가 user_state_changed(speaking) 이벤트에 배선한다. turn 완료
+        시점의 epoch와 대조해 이탈 전에 시작된 입력의 커밋을 차단한다.
+        """
+        if self._epoch_fn is not None:
+            self._input_epoch = self._epoch_fn()
 
     def invalidate_inflight(self) -> None:
         """이탈 관측 시 진행 중 질문 생성·발화 폐기 — 청자 없음(recovery §1).
@@ -420,6 +444,16 @@ class TurnPipeline:
                     self.begin_closing(EndCause.FINAL_QUESTION)
                     return
         async with self._commit_lock:
+            if (
+                self._closed
+                or turn_seq != self._turn_seq
+                or not self._listener_present()
+            ):
+                # 재생 중 이탈 — 커밋·전이 없이 폐기(재입장 앵커 또는 창 소진이 수렴).
+                # 종료 국면 진입만으로는 폐기하지 않는다(들은 질문은 커밋 — WAITING
+                # 전이는 전진 전용 상태 머신이 자연 무시한다)
+                logger.info("final 재생 완료 후 무효화·청자 부재 — 커밋·전이 폐기")
+                return
             number = self._log.last_question_number() + 1
             self._commit(
                 self._log.append_question(
@@ -480,6 +514,17 @@ class TurnPipeline:
                     return
 
         async with self._commit_lock:
+            if (
+                self._closed
+                or turn_seq != self._turn_seq
+                or not self._listener_present()
+            ):
+                # 재생 중 이탈(턴 무효화·청자 부재) — 빈 룸에 재생을 마친 질문은
+                # "실제 들은 발화"가 아니다. 커밋 없이 폐기한다(재개 앵커가 수렴).
+                # 종료 국면 진입(phase)만으로는 폐기하지 않는다 — 재실 candidate가
+                # 들은 질문은 기존 계약대로 커밋되고 클로징이 그 뒤를 잇는다
+                logger.info("재생 완료 후 무효화·청자 부재 — 질문 커밋 폐기")
+                return
             number = self._log.last_question_number() + 1
             parent = (
                 self._log.current_root()

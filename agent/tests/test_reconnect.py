@@ -133,3 +133,28 @@ def test_repeated_cycles_record_fresh_deadline_each_time():
     assert env.clears == 2
     assert env.resumes == 2
     assert env.closings == []
+
+
+def test_deadline_ops_are_serialized_on_fast_reentry():
+    """빠른 재입장 — 늦은 HSET이 HDEL을 되살리지 않도록 발생 순서대로 실행된다."""
+    env = _make()
+    order: list[str] = []
+
+    async def slow_record(deadline):
+        await asyncio.sleep(0.05)  # 기록이 느린 상황 — 직렬화 없으면 clear가 앞선다
+        order.append("record")
+
+    async def fast_clear():
+        order.append("clear")
+
+    env.monitor._record_deadline_fn = slow_record
+    env.monitor._clear_deadline_fn = fast_clear
+
+    async def scenario():
+        env.monitor.on_participant_disconnected(CANDIDATE)
+        env.monitor.on_participant_connected(CANDIDATE)
+        await asyncio.sleep(0.2)
+        await env.monitor.aclose()
+
+    asyncio.run(scenario())
+    assert order == ["record", "clear"]  # FIFO — 소진된 deadline이 되살아나지 않는다
