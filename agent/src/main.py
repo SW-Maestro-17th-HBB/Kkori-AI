@@ -12,8 +12,10 @@ from livekit.agents import (
     RoomInputOptions,
     TurnHandlingOptions,
     inference,
+    tokenize,
 )
-from livekit.plugins import deepgram
+from livekit.agents.tts import StreamAdapter
+from livekit.plugins import deepgram, elevenlabs
 
 from src.config import (
     AGENT_NAME,
@@ -33,7 +35,10 @@ from src.config import (
     STT_MODEL,
     TTS_LANGUAGE,
     TTS_MODEL,
-    TTS_VOICE,
+    TTS_SIMILARITY,
+    TTS_SPEED,
+    TTS_STABILITY,
+    TTS_VOICE_ID,
     WRAP_UP_REMAINING_SECONDS,
 )
 from src.interview.conversation_log import ConversationLog
@@ -91,6 +96,24 @@ class InterviewerAgent(Agent):
             new_message.text_content or "",
             speech_started_at=metrics.get("started_speaking_at"),
         )
+
+
+def _build_tts():
+    eleven_tts = elevenlabs.TTS(
+        model=TTS_MODEL,
+        voice_id=TTS_VOICE_ID,
+        language=TTS_LANGUAGE,
+        voice_settings=elevenlabs.VoiceSettings(
+            stability=TTS_STABILITY, similarity_boost=TTS_SIMILARITY, speed=TTS_SPEED
+        ),
+    )
+    if TTS_MODEL.startswith("eleven_v3"):
+        # v3는 웹소켓 stream-input 미지원(핸드셰이크 403 실측) — 문장 단위로 끊어
+        # HTTP 합성하는 StreamAdapter로 우회. LLM 스트림과 합성이 직렬화되어 지연 증가
+        return StreamAdapter(
+            tts=eleven_tts, sentence_tokenizer=tokenize.basic.SentenceTokenizer()
+        )
+    return eleven_tts
 
 
 def _make_say_fn(session: AgentSession):
@@ -388,7 +411,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     # TurnDetector는 VAD가 없으면 비활성화되므로 vad를 반드시 전달한다.
     session = AgentSession(
         stt=deepgram.STT(model=STT_MODEL, language=STT_LANGUAGE),
-        tts=inference.TTS(model=TTS_MODEL, voice=TTS_VOICE, language=TTS_LANGUAGE),
+        tts=_build_tts(),
         vad=inference.VAD(),
         turn_handling=TurnHandlingOptions(turn_detection=inference.TurnDetector()),
     )

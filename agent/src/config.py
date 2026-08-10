@@ -8,12 +8,19 @@ AGENT_NAME = "kkori-interviewer"
 STT_MODEL = "nova-3"
 STT_LANGUAGE = "ko"
 
-# LiveKit Inference 경유 모델 — 별도 프로바이더 키 없이 LiveKit 자격증명만으로 동작
-# (TTS·VAD는 계속 이 경로. LLM은 Bedrock이 기본이며 아래 토글로 전환기 한정 병행)
-LLM_MODEL = "openai/gpt-4.1-mini"
-TTS_MODEL = "cartesia/sonic-3"
-TTS_VOICE = "9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"
+# ElevenLabs TTS 직결 — livekit-plugins-elevenlabs + ELEVEN_API_KEY (Inference 경유 아님).
+# eleven_v3 표현력 실험 중 — v3는 웹소켓 stream-input 미지원(실측 403)이라 main에서
+# 문장 단위 HTTP 합성(StreamAdapter)으로 우회. 지연이 크면 eleven_flash_v2_5(웹소켓, TTFB ~0.3s)로 복귀
+TTS_MODEL = "eleven_v3"
+TTS_VOICE_ID = "4JJwo477JUAx3HV0T7n7"  # Voice Library에서 선정한 중·장년 남성 면접관 톤
 TTS_LANGUAGE = "ko"
+TTS_SPEED = 1.1  # 발화 속도 (허용 0.7~1.2, 1.0이 기본) — 체감 조정값
+TTS_STABILITY = 0.4  # 낮을수록 감정 표현 폭이 커짐 — AI 느낌 완화 목적 조정값
+TTS_SIMILARITY = 0.8  # 원본 화자 유사도
+
+# LiveKit Inference 경유 모델 — 별도 프로바이더 키 없이 LiveKit 자격증명만으로 동작
+# (VAD·TurnDetector는 계속 이 경로. LLM은 Bedrock이 기본이며 아래 토글로 전환기 한정 병행)
+LLM_MODEL = "openai/gpt-4.1-mini"
 
 # LLM 프로바이더 토글 — 전환기 한정(Bedrock 안정화 후 inference 경로·토글 제거 예정).
 # .env는 main의 load_dotenv()가 이 모듈 임포트보다 늦게 읽으므로 환경변수 참조는 사용 시점에 한다.
