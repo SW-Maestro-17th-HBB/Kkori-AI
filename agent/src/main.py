@@ -13,6 +13,7 @@ from livekit.agents import (
     TurnHandlingOptions,
     inference,
 )
+from livekit.plugins import deepgram
 
 from src.config import (
     AGENT_NAME,
@@ -386,7 +387,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     # 본론 질문은 TurnPipeline이 세션 밖 LLM으로 생성해 say()로 발화한다.
     # TurnDetector는 VAD가 없으면 비활성화되므로 vad를 반드시 전달한다.
     session = AgentSession(
-        stt=inference.STT(model=STT_MODEL, language=STT_LANGUAGE),
+        stt=deepgram.STT(model=STT_MODEL, language=STT_LANGUAGE),
         tts=inference.TTS(model=TTS_MODEL, voice=TTS_VOICE, language=TTS_LANGUAGE),
         vad=inference.VAD(),
         turn_handling=TurnHandlingOptions(turn_detection=inference.TurnDetector()),

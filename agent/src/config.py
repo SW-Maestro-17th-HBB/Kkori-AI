@@ -3,10 +3,13 @@
 # 명시 디스패치 등록명 — Spring createDispatch(agentName)와 동일 값 (세션 생성 계약, 임의 변경 금지)
 AGENT_NAME = "kkori-interviewer"
 
-# LiveKit Inference 경유 모델 — 별도 프로바이더 키 없이 LiveKit 자격증명만으로 동작
-# (STT·TTS·VAD는 계속 이 경로. LLM은 Bedrock이 기본이며 아래 토글로 전환기 한정 병행)
-STT_MODEL = "deepgram/nova-3"
+# Deepgram STT 직결 — livekit-plugins-deepgram + DEEPGRAM_API_KEY (Inference 경유 아님).
+# Nova-3 한국어는 단일 언어 지정(ko)으로 지원 — multi(다국어 감지) 모드는 한국어 미포함이라 고정 지정
+STT_MODEL = "nova-3"
 STT_LANGUAGE = "ko"
+
+# LiveKit Inference 경유 모델 — 별도 프로바이더 키 없이 LiveKit 자격증명만으로 동작
+# (TTS·VAD는 계속 이 경로. LLM은 Bedrock이 기본이며 아래 토글로 전환기 한정 병행)
 LLM_MODEL = "openai/gpt-4.1-mini"
 TTS_MODEL = "cartesia/sonic-3"
 TTS_VOICE = "9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"
