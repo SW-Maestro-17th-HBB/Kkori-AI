@@ -141,7 +141,7 @@ def test_db():
             """
         )
         # 면접 도메인 소유 — 워커는 읽기 전용. interview_session(단수)은 백엔드 실물 엔티티의
-        # 최소 형태(워커가 읽는 컬럼만), interview_transcripts 는 에이전트 구현(HBB1-287) 전 잠정
+        # 최소 형태(워커가 읽는 컬럼만), interview_transcript 는 에이전트 실물(HBB1-287)의 최소 형태
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS interview_session (
@@ -154,11 +154,11 @@ def test_db():
         )
         conn.execute(
             """
-            CREATE TABLE IF NOT EXISTS interview_transcripts (
+            CREATE TABLE IF NOT EXISTS interview_transcript (
                 id BIGSERIAL PRIMARY KEY,
-                interview_session_id BIGINT NOT NULL UNIQUE,
-                utterances JSONB NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                session_id BIGINT NOT NULL UNIQUE,
+                content JSONB NOT NULL,
+                deleted_at TIMESTAMPTZ
             )
             """
         )
@@ -175,7 +175,7 @@ async def conn(test_db):
     await c.execute(
         "TRUNCATE resume_chunks, resume_analysis_status, resumes, "
         "reports, report_scores, report_feedbacks, report_generation_jobs, "
-        "interview_session, interview_transcripts"
+        "interview_session, interview_transcript"
     )
     yield c
     await c.close()
@@ -215,6 +215,6 @@ async def seed_transcript(conn, session_id: int, utterances: list[dict]) -> None
     from psycopg.types.json import Jsonb
 
     await conn.execute(
-        "INSERT INTO interview_transcripts (interview_session_id, utterances) VALUES (%s, %s)",
+        "INSERT INTO interview_transcript (session_id, content) VALUES (%s, %s)",
         (session_id, Jsonb(utterances)),
     )

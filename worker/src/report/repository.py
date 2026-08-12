@@ -101,16 +101,47 @@ async def load_snapshot_source(conn: AsyncConnection, session_id: int) -> dict |
     return await cur.fetchone()
 
 
+# 에이전트 실구현(HBB1-287)의 직렬화 → 계약 모델 정규화. 값 집합 확정(PRD report.md §1
+# 기타 "미정" 항목) 전까지의 읽기 측 흡수 — 확정되면 계약 모델로 옮기고 제거한다.
+# speaker: CANDIDATE(실구현) = USER(계약). questionType: followup(꼬리)만 TAIL이고
+# initial/topic/final은 본질문(MAIN), closing은 마무리 인사(유형 구분이 없어 MAIN으로
+# 흡수), 지원자 발화에는 키 자체가 없다(쌍의 유형은 어차피 면접관 발화가 정한다).
+# 계약 값(USER/MAIN/TAIL)은 그대로 통과시켜 양 형식 모두 수용한다.
+# questionNumber 없는 발화(closing 인사)는 어느 질문-답변 쌍에도 속하지 않으므로
+# 평가 입력에서 제외한다 — 타임라인(Spring §4)은 대본을 직접 읽어 영향 없다.
+_SPEAKER_ALIASES = {"CANDIDATE": "USER"}
+_QUESTION_TYPE_ALIASES = {
+    "initial": "MAIN",
+    "topic": "MAIN",
+    "final": "MAIN",
+    "closing": "MAIN",
+    "followup": "TAIL",
+}
+
+
+def _normalize_utterance(raw: dict) -> dict:
+    utterance = dict(raw)
+    speaker = utterance.get("speaker")
+    utterance["speaker"] = _SPEAKER_ALIASES.get(speaker, speaker)
+    question_type = utterance.get("questionType") or "MAIN"
+    utterance["questionType"] = _QUESTION_TYPE_ALIASES.get(question_type, question_type)
+    return utterance
+
+
 async def load_transcript(conn: AsyncConnection, session_id: int) -> list[Utterance] | None:
     """대본(세션당 1행 jsonb) → 발화 목록. 대본이 없으면 None(스킵 대상)."""
     cur = await conn.execute(
-        "SELECT utterances FROM interview_transcripts WHERE interview_session_id = %s",
+        "SELECT content FROM interview_transcript WHERE session_id = %s",
         (session_id,),
     )
     row = await cur.fetchone()
     if row is None:
         return None
-    return [Utterance.model_validate(u) for u in row["utterances"]]
+    return [
+        Utterance.model_validate(_normalize_utterance(u))
+        for u in row["content"]
+        if u.get("questionNumber") is not None
+    ]
 
 
 # ---------------------------------------------------------------- 로우 생성
