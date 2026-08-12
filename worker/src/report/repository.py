@@ -106,11 +106,16 @@ async def load_snapshot_source(conn: AsyncConnection, session_id: int) -> dict |
 # speaker: CANDIDATE(실구현) = USER(계약). questionType: followup(꼬리)만 TAIL이고
 # initial/topic/final은 본질문(MAIN), closing은 마무리 인사(유형 구분이 없어 MAIN으로
 # 흡수), 지원자 발화에는 키 자체가 없다(쌍의 유형은 어차피 면접관 발화가 정한다).
-# 계약 값(USER/MAIN/TAIL)은 그대로 통과시켜 양 형식 모두 수용한다.
+# 계약 값(USER/MAIN/TAIL)은 그대로 통과시켜 양 형식 모두 수용하고, 표에 없는 미지의
+# questionType은 MAIN으로 흡수한다 — 이 값의 용도는 평가 프롬프트의 본질문/꼬리 라벨
+# 하나뿐이라, 미지 값에 검증 실패로 리포트 전체를 막는 것보다 피해가 작다(리뷰 반영).
+# speaker는 질문-답변 매칭에 직결되므로 미지 값을 흡수하지 않고 검증 실패로 드러낸다.
 # questionNumber 없는 발화(closing 인사)는 어느 질문-답변 쌍에도 속하지 않으므로
 # 평가 입력에서 제외한다 — 타임라인(Spring §4)은 대본을 직접 읽어 영향 없다.
 _SPEAKER_ALIASES = {"CANDIDATE": "USER"}
 _QUESTION_TYPE_ALIASES = {
+    "MAIN": "MAIN",
+    "TAIL": "TAIL",
     "initial": "MAIN",
     "topic": "MAIN",
     "final": "MAIN",
@@ -124,7 +129,7 @@ def _normalize_utterance(raw: dict) -> dict:
     speaker = utterance.get("speaker")
     utterance["speaker"] = _SPEAKER_ALIASES.get(speaker, speaker)
     question_type = utterance.get("questionType") or "MAIN"
-    utterance["questionType"] = _QUESTION_TYPE_ALIASES.get(question_type, question_type)
+    utterance["questionType"] = _QUESTION_TYPE_ALIASES.get(question_type, "MAIN")
     return utterance
 
 
