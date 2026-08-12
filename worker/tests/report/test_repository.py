@@ -111,6 +111,37 @@ async def test_대본_조회와_파싱(conn):
     assert await repo.load_transcript(conn, session_id + 999) is None  # 대본 없음
 
 
+@pytest.mark.parametrize(
+    ("raw_type", "expected"),
+    [
+        ("initial", "MAIN"),
+        ("topic", "MAIN"),
+        ("final", "MAIN"),
+        ("closing", "MAIN"),
+        ("followup", "TAIL"),
+        ("MAIN", "MAIN"),  # 계약 값은 그대로 통과
+        ("TAIL", "TAIL"),
+        (None, "MAIN"),  # 지원자 발화 — 키 없음/None
+        ("", "MAIN"),
+        ("unknown-new-type", "MAIN"),  # 미지 값은 MAIN으로 흡수 (검증 실패로 막지 않음)
+    ],
+)
+def test_정규화_questionType_별칭과_폴백(raw_type, expected):
+    raw = {"speaker": "CANDIDATE", "content": "답변"}
+    if raw_type is not None:
+        raw["questionType"] = raw_type
+    assert repo._normalize_utterance(raw)["questionType"] == expected
+
+
+def test_정규화_speaker는_별칭만_바꾸고_미지값은_보존한다():
+    # CANDIDATE(실구현) → USER(계약), 계약 값은 통과, 미지 값은 흡수하지 않고
+    # 보존해 Utterance 검증 실패로 드러낸다 — 질문-답변 매칭에 직결되는 필드다
+    assert repo._normalize_utterance({"speaker": "CANDIDATE"})["speaker"] == "USER"
+    assert repo._normalize_utterance({"speaker": "INTERVIEWER"})["speaker"] == "INTERVIEWER"
+    assert repo._normalize_utterance({"speaker": "USER"})["speaker"] == "USER"
+    assert repo._normalize_utterance({"speaker": "OBSERVER"})["speaker"] == "OBSERVER"
+
+
 @pytest.mark.asyncio
 async def test_상태_CAS_성공과_양보(conn):
     session_id, resume_id = await seed_session(conn)
