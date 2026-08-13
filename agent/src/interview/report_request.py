@@ -1,6 +1,6 @@
 """리포트 생성 요청 발행 — flush 성공 후 Redis Stream XADD. docs/prd/interview-end.md §5.
 
-메시지는 포인터다 — `session_id` 단일 필드만 담고(worker 합의 스키마), worker가
+메시지는 포인터다 — `sessionId` 단일 필드만 담고(worker 합의 스키마), worker가
 DB의 transcript를 읽는다. 발행 시각은 별도 필드 없이 스트림 entry ID
 (`<밀리초>-<시퀀스>`)에 내장돼 있다. 재시도로 같은 세션의 메시지가 중복 발행될 수
 있으므로 소비 측(worker)이 session_id 기준으로 멱등 처리한다는 것이 계약이다.
@@ -32,7 +32,7 @@ async def publish_report_request(session_id: str) -> bool:
     if not url:
         logger.warning("%s 미설정 — 리포트 요청 발행 생략", REDIS_URL_ENV)
         return False
-    fields = {"session_id": session_id}
+    fields = {"sessionId": session_id}
     for attempt in range(1, _PUBLISH_ATTEMPTS + 1):
         redis: Redis | None = None
         try:
