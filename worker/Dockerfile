@@ -14,4 +14,6 @@ COPY shared/ shared/
 COPY worker/src/ src/
 
 ENV PATH="/app/.venv/bin:$PATH"
-CMD ["faststream", "run", "src.main:app"]
+# 동기 디스패치 실험(PRD §11)용 HTTP — 리포트 워커는 이 CMD 를 override 해 무영향
+EXPOSE 8000
+CMD ["faststream", "run", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
