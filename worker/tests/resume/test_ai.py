@@ -44,10 +44,44 @@ def test_embed_documents_순서와_개수_보존():
     assert vecs[0] == embedder.embed_query("a")
 
 
+def test_가짜_임베딩_지연_기본0은_즉시():
+    import time
+
+    embedder = FakeEmbedder(dim=8)
+    assert embedder.delay_s == 0.0
+    start = time.perf_counter()
+    embedder.embed_documents(["a"])
+    assert time.perf_counter() - start < 0.05
+
+
+def test_가짜_임베딩_지연_설정시_대기():
+    import time
+
+    embedder = FakeEmbedder(dim=8, delay_s=0.1)
+    start = time.perf_counter()
+    embedder.embed_documents(["a"])
+    assert time.perf_counter() - start >= 0.1
+
+
+def test_embed_query는_지연_미적용():
+    """지연은 분석 경로(embed_documents) 전용 — 검색 질의 임베딩은 즉시 (§11.3)."""
+    import time
+
+    embedder = FakeEmbedder(dim=8, delay_s=0.2)
+    start = time.perf_counter()
+    embedder.embed_query("a")
+    assert time.perf_counter() - start < 0.1
+
+
 def test_팩토리_fake_선택():
     s = Settings(ai_provider="fake")
     assert isinstance(build_structurer(s), Structurer)
     assert isinstance(build_embedder(s), Embedder)
+
+
+def test_팩토리_fake_지연설정_전달():
+    embedder = build_embedder(Settings(ai_provider="fake", fake_delay_seconds=0.5))
+    assert embedder.delay_s == 0.5
 
 
 def test_팩토리_bedrock_구현체_반환():
