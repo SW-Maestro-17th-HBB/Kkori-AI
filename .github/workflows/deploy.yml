@@ -1,0 +1,72 @@
+# CD — main 브랜치 push(= develop→main 머지) 시 agent·worker 프로드 배포.
+# 인증은 GitHub OIDC → kkori-cd 롤 (액세스 키 없음, Kkori-Infra envs/prod/cicd.tf 참조).
+# agent 소유 DB 마이그레이션(agent/migrations/)은 이 파이프라인이 적용하지 않는다 — 수동 선적용 필요.
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-northeast-2
+  ECR: 172630972882.dkr.ecr.ap-northeast-2.amazonaws.com
+
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::172630972882:role/kkori-cd
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@v2
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: agent/Dockerfile
+          platforms: linux/arm64
+          push: true
+          tags: ${{ env.ECR }}/kkori/agent:prod
+          cache-from: type=gha,scope=agent
+          cache-to: type=gha,mode=max,scope=agent
+      - name: ECS 재배포 및 안정화 대기
+        run: |
+          aws ecs update-service --cluster kkori-prod --service kkori-prod-agent --force-new-deployment
+          aws ecs wait services-stable --cluster kkori-prod --services kkori-prod-agent
+
+  worker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::172630972882:role/kkori-cd
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@v2
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: worker/Dockerfile
+          platforms: linux/arm64
+          push: true
+          tags: ${{ env.ECR }}/kkori/worker:prod
+          cache-from: type=gha,scope=worker
+          cache-to: type=gha,mode=max,scope=worker
+      - name: ECS 재배포 및 안정화 대기 (이력서·리포트 워커)
+        run: |
+          aws ecs update-service --cluster kkori-prod --service kkori-prod-resume-worker --force-new-deployment
+          aws ecs update-service --cluster kkori-prod --service kkori-prod-report-worker --force-new-deployment
+          aws ecs wait services-stable --cluster kkori-prod --services kkori-prod-resume-worker kkori-prod-report-worker
