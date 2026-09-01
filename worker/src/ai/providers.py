@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
@@ -94,10 +95,15 @@ class FakeEmbedder:
 
     같은 텍스트 → 항상 같은 벡터, 다른 텍스트 → 다른 벡터. 값은 [0, 1] 범위.
     임베딩 '품질'은 없음 — 파이프라인 로직 검증 전용.
+
+    `delay_s` 는 부하 테스트용 인위 지연(PRD §11.3) — 분석 1건당 1회인 embed_documents
+    에만 적용해 종단까지 추가 지연 ≈ delay_s 가 된다. sync 메서드의 `time.sleep` 이지만
+    파이프라인이 `asyncio.to_thread` 로 부르므로 이벤트 루프를 막지 않는다.
     """
 
-    def __init__(self, dim: int = 1024) -> None:
+    def __init__(self, dim: int = 1024, delay_s: float = 0.0) -> None:
         self.dim = dim
+        self.delay_s = delay_s
 
     def _vector(self, text: str) -> list[float]:
         out: list[float] = []
@@ -109,6 +115,8 @@ class FakeEmbedder:
         return out[: self.dim]
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        if self.delay_s > 0:
+            time.sleep(self.delay_s)
         return [self._vector(t) for t in texts]
 
     def embed_query(self, text: str) -> list[float]:
@@ -322,7 +330,7 @@ def build_structurer(settings: Settings) -> Structurer:
 
 def build_embedder(settings: Settings) -> Embedder:
     if settings.ai_provider == "fake":
-        return FakeEmbedder(dim=settings.embedding_dim)
+        return FakeEmbedder(dim=settings.embedding_dim, delay_s=settings.fake_delay_seconds)
     if settings.ai_provider == "bedrock":
         return BedrockEmbedder(settings)
     raise ValueError(f"알 수 없는 ai_provider: {settings.ai_provider}")

@@ -75,6 +75,11 @@ class Settings(BaseSettings):
     retry_max_attempts: int = 3  # 외부 호출(S3·LLM·임베딩) 내부 재시도 최대 시도 수 (§9)
     retry_base_delay_s: float = 1.0  # 지수 백오프 시작 간격 — 1s → 2s → 4s
 
+    # --- 동기 디스패치 실험 (§11) ---
+    # fake 제공자의 인위 지연 — 분석 1건당 총 지연 ≈ 이 값 (FakeEmbedder.embed_documents 에만
+    # 적용, 임베딩 단계는 FULL/REINDEX 어느 경로든 종단 전 정확히 1회). 0 = 지연 없음(기존 동작).
+    fake_delay_seconds: float = 0.0
+
     # --- 청킹 (§2.5) ---
     chunk_target_tokens: int = 512  # 초과 엔티티만 문장 경계로 분할
     chunk_overlap_sentences: int = 1  # 분할 조각 간 겹침
