@@ -1,0 +1,136 @@
+# CD — main 브랜치 push(= develop→main 머지)로 도는 CI가 "성공"해야만 agent·worker 프로드 배포.
+# 인증은 GitHub OIDC → kkori-cd 롤 (액세스 키 없음, Kkori-Infra envs/prod/cicd.tf 참조).
+# workflow_run 트리거는 기본 브랜치(develop)에 있는 이 파일 기준으로 동작한다 — develop 머지 후부터 유효.
+#
+# CI가 경로 필터로 나뉘어 있어(Agent CI / Worker CI) 한 커밋에 둘 다 돌 수 있다 — gate 잡이
+# 같은 커밋의 두 CI 상태를 조회해 "전부 끝났고 전부 성공"일 때만, 그것도 마지막에 끝난 CI가
+# 트리거한 실행에서만 배포를 진행한다(중복 배포 방지). 한쪽만 돈 커밋이면 그 CI 성공만 본다.
+#
+# 두 이미지가 모두 push된 뒤에만 ECS를 갱신한다(deploy 잡의 needs) — 한쪽 빌드 실패로 부분 재배포되는 상황을 막기 위함.
+# 자동 롤백은 없다: ECS 서비스가 :prod 가변 태그를 참조하므로(Kkori-Infra README 배포 흐름) 서킷브레이커 롤백도 같은 이미지를 다시 당긴다.
+#   되돌릴 때는 이전 커밋의 :<sha> 태그를 :prod로 재태깅한 뒤 update-service --force-new-deployment (수동).
+# agent 소유 DB 마이그레이션(agent/migrations/)은 이 파이프라인이 적용하지 않는다 — 수동 선적용 필요.
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: [Agent CI, Worker CI]
+    types: [completed]
+    branches: [main]
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-northeast-2
+  AWS_ROLE: arn:aws:iam::172630972882:role/kkori-cd
+  ECR: 172630972882.dkr.ecr.ap-northeast-2.amazonaws.com
+
+jobs:
+  gate:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read # 같은 커밋의 다른 CI 실행 상태 조회용
+    outputs:
+      proceed: ${{ steps.check.outputs.proceed }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          proceed=true
+          for wf in agent-ci.yml worker-ci.yml; do
+            run=$(gh api "repos/${{ github.repository }}/actions/workflows/$wf/runs?head_sha=$SHA&per_page=1" \
+              --jq '.workflow_runs[0] // empty | .status + "/" + (.conclusion // "")')
+            echo "$wf: ${run:-실행 없음(경로 미해당)}"
+            case "$run" in
+              "") ;;                    # 해당 경로 변경 없음 — CI 자체가 안 돎
+              completed/success) ;;
+              completed/*) echo "::error::$wf 실패 — 배포 중단"; exit 1 ;;
+              *) proceed=false ;;       # 아직 진행 중 — 그 CI 완료가 새 Deploy를 트리거하므로 이번 실행은 양보
+            esac
+          done
+          echo "proceed=$proceed" >> "$GITHUB_OUTPUT"
+
+  build-agent:
+    needs: gate
+    if: needs.gate.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # OIDC AssumeRole
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }} # CI가 검증한 바로 그 커밋을 빌드
+          persist-credentials: false # checkout 이후 git 작업 없음
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@v2
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: agent/Dockerfile
+          platforms: linux/arm64
+          push: true
+          # :prod = 서비스가 참조하는 배포 태그, :<sha> = 롤백용 불변 태그 (ECR 라이프사이클: 최근 10개 보관)
+          tags: |
+            ${{ env.ECR }}/kkori/agent:prod
+            ${{ env.ECR }}/kkori/agent:${{ github.event.workflow_run.head_sha }}
+          cache-from: type=gha,scope=agent
+          cache-to: type=gha,mode=max,scope=agent
+
+  build-worker:
+    needs: gate
+    if: needs.gate.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@v2
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: worker/Dockerfile
+          platforms: linux/arm64
+          push: true
+          tags: |
+            ${{ env.ECR }}/kkori/worker:prod
+            ${{ env.ECR }}/kkori/worker:${{ github.event.workflow_run.head_sha }}
+          cache-from: type=gha,scope=worker
+          cache-to: type=gha,mode=max,scope=worker
+
+  deploy:
+    needs: [build-agent, build-worker]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # checkout 없음 — contents 권한 불필요
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: ECS 재배포 및 안정화 대기 (agent · 이력서 워커 · 리포트 워커)
+        run: |
+          aws ecs update-service --cluster kkori-prod --service kkori-prod-agent --force-new-deployment
+          aws ecs update-service --cluster kkori-prod --service kkori-prod-resume-worker --force-new-deployment
+          aws ecs update-service --cluster kkori-prod --service kkori-prod-report-worker --force-new-deployment
+          aws ecs wait services-stable --cluster kkori-prod --services kkori-prod-agent kkori-prod-resume-worker kkori-prod-report-worker

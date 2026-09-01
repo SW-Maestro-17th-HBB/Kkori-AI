@@ -2,7 +2,7 @@
 FROM python:3.13-slim
 
 # uv 바이너리 (공식 배포 이미지에서 복사)
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+COPY --from=ghcr.io/astral-sh/uv:0.11 /uv /uvx /usr/local/bin/
 
 WORKDIR /app
 
