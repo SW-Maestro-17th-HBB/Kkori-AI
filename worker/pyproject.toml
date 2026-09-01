@@ -18,6 +18,7 @@ dependencies = [
     # 계약/설정 모델
     "pydantic",
     "pydantic-settings",
+    "uvicorn>=0.52.4",
 ]
 
 [dependency-groups]

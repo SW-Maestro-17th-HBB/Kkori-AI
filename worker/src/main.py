@@ -7,7 +7,10 @@
 주면 XREADGROUP 대신 XAUTOCLAIM 을 도는 회수 전용 모드가 되어 갓 들어온 메시지를 못
 읽으므로(실측 확인), 한 구독자가 둘 다 할 수 없어 나눈다.
 
-실행: `faststream run src.main:app`
+동기 디스패치 실험(PRD §11)으로 같은 프로세스에 HTTP 엔드포인트
+(`POST /internal/analyses/resume`)도 서빙한다 — 앱은 `AsgiFastStream`.
+
+실행: `faststream run src.main:app` (HTTP 는 uvicorn 기본 127.0.0.1:8000)
 """
 
 from __future__ import annotations
@@ -15,9 +18,12 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from pydantic import ValidationError
 from redis.asyncio import Redis
 
-from faststream import AckPolicy, FastStream
+from faststream import AckPolicy
+from faststream.asgi import AsgiFastStream, AsgiResponse, Request, post
+from faststream.asgi.response import JSONResponse
 from faststream.redis import RedisBroker, RedisStreamMessage, StreamSub
 from faststream.redis.annotations import Redis as InjectedRedis  # Context 주입용 애노테이션
 
@@ -29,13 +35,19 @@ from src.contract import AnalysisStatus, ParseRequest
 from src.contract.fields import decode_fields
 from src.messaging.pel import get_delivery_count
 from src.messaging.streams import publish_status
-from src.storage.repository import connect, ensure_schema, record_last_error
+from src.storage.repository import (
+    connect,
+    ensure_schema,
+    get_error_message,
+    get_parse_status,
+    record_last_error,
+)
 
 logger = logging.getLogger(__name__)
 
 settings: Settings = get_settings()
 broker = RedisBroker(settings.redis_url)
-app = FastStream(broker)
+app = AsgiFastStream(broker)
 
 
 class _Resources:
@@ -193,3 +205,63 @@ async def handle_reclaimed(msg: RedisStreamMessage, redis: InjectedRedis) -> Non
     if not message_ids:  # 회수 경로는 항상 한 건씩 오지만 방어적으로
         return
     await reclaim_one(redis, message_ids[0], msg.raw_message["data"])
+
+
+# ------------------------------------------------- 동기 디스패치 실험 (PRD §11)
+
+SYNC_ANALYZE_PATH = "/internal/analyses/resume"  # Spring ResumeAnalysisSyncHttpRequester 와 일치
+
+
+@post
+async def handle_sync_analyze(request: Request) -> AsgiResponse:
+    """실험용 동기 분석 진입점 — 2xx = EMBEDDED 종결까지 완료 (§11.1 계약).
+
+    파싱·검증만 하고 처리는 `analyze_sync` 가 한다(구독자와 같은 얇은 배선 스타일).
+    """
+    try:
+        payload = await request.json()
+    except Exception as e:
+        return JSONResponse({"error": f"잘못된 JSON: {e}"}, 400)
+    try:
+        parsed = ParseRequest.model_validate(payload)
+    except ValidationError as e:
+        return JSONResponse({"error": f"계약 위반 바디: {e}"}, 422)
+    return await analyze_sync(parsed, broker._connection)
+
+
+async def analyze_sync(request: ParseRequest, redis: Redis) -> AsgiResponse:
+    """동기 처리 배선 — 스트림 경로와 같은 `_process` 를 태우고 종단 상태로 응답을 가른다.
+
+    상태 이벤트도 동일하게 발행되어 두 경로의 작업량이 같다(§11.2 공정 비교 조건).
+    프레임워크(HttpHandler)의 포괄 500 은 에러 내용을 숨기므로 여기서 직접 잡아 노출한다
+    — 비-2xx 시 FAILED 전이는 호출자(Spring) 책임이라 실패 원인이 보여야 한다.
+    """
+    try:
+        await _process(request, delivery_count=1, redis=redis)
+    except Exception as e:
+        logger.exception("동기 분석 실패 (resumeId=%s)", request.resumeId)
+        return JSONResponse(
+            {"resumeId": request.resumeId, "error": f"{type(e).__name__}: {e}"}, 500
+        )
+
+    # process_request 는 유령·REINDEX 계약 위반에서도 예외 없이 반환하므로 상태 재조회로 판정
+    injected = _Resources.db is not None
+    conn = _Resources.db if injected else await connect(settings)
+    try:
+        status = await get_parse_status(conn, request.resumeId)
+        error = await get_error_message(conn, request.resumeId) if status == AnalysisStatus.FAILED else None
+    finally:
+        if not injected:
+            await conn.close()
+
+    body = {"resumeId": request.resumeId, "status": status}
+    if status == AnalysisStatus.EMBEDDED:  # 이미 EMBEDDED 였던 중복 호출도 200 — 멱등(§2.4)
+        return JSONResponse(body, 200)
+    if status is None:
+        return JSONResponse({**body, "error": "상태 레코드 없음"}, 404)
+    if status == AnalysisStatus.FAILED:
+        return JSONResponse({**body, "error": error or "분석 실패"}, 500)
+    return JSONResponse({**body, "error": "비종결 상태로 반환됨"}, 409)  # 다른 처리자에 양보 등
+
+
+app.mount(SYNC_ANALYZE_PATH, handle_sync_analyze)
