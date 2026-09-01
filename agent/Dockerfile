@@ -15,7 +15,12 @@ ENV PATH="/app/.venv/bin:$PATH"
 COPY shared/ shared/
 COPY agent/src/ src/
 
-RUN useradd --create-home --uid 10001 appuser
+RUN useradd --create-home --uid 10001 appuser \
+    && mkdir -p /app/.hf && chown appuser:appuser /app/.hf
 USER appuser
+
+# 로컬 inference 모델(턴 디텍터 등)을 빌드 시점에 캐시 — 컨테이너 첫 기동 시 다운로드 지연 방지
+ENV HF_HOME=/app/.hf
+RUN python -m src.main download-files
 
 CMD ["python", "-m", "src.main", "start"]
