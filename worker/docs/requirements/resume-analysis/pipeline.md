@@ -322,6 +322,48 @@ at-least-once + XAUTOCLAIM 회수는 **실제로 죽지 않은 원본과 회수�
 - **OCR / 이미지-only PDF 지원(추후)** — 현재는 빈 추출을 `FAILED`로 종결(§2.1). 스캔 이력서 수요가 확인되면
   OCR 단계를 텍스트 추출에 추가.
 
+---
+
+## 11. 실험 — 동기 HTTP 디스패치 (HBB1-327 연계)
+
+동기/비동기 디스패치 부하 비교 실험(Kkori-Backend `docs/experiments/sync-dispatch.md`)을 위해,
+스트림 소비와 **같은 프로세스**에 HTTP 엔드포인트를 둔다. 실험 종료 후 제거 가능한 장치이며,
+이 워커의 기본 역할(비동기 처리기, Overview)은 변하지 않는다.
+
+### 11.1 엔드포인트 계약
+
+```
+POST /internal/analyses/resume
+Content-Type: application/json
+
+{ "resumeId": 1, "userId": 2, "bucket": "kkori-resumes", "objectKey": "resumes/2/....pdf", "mode": "FULL" }
+```
+
+- 바디는 §1.1 요청 메시지와 동일한 5필드. `resumeId`/`userId`는 JSON 숫자로 실린다(스트림 경로의 문자열화와 다름)
+- **2xx는 처리가 전부 끝난 뒤에만** — 파싱·결과 저장·상태 전이(`EMBEDDED`)까지. 상태 전이 소유권은 비동기와 동일하게 워커
+- 비-2xx면 Spring이 FAILED 전이·사용자 응답을 담당하므로, 워커는 실패를 숨기지 않고 에러를 응답 바디에 그대로 노출한다
+  (Spring은 상태 코드만 보고 바디는 읽지 않음 — 바디는 디버깅용)
+- Spring 측 타임아웃: connect 3s / read 120s (기본) — 처리 시간이 120s를 넘으면 호출자가 FAILED로 간주한다
+- 인증 없음(내부 네트워크 전제)
+
+### 11.2 구현 방식
+
+- 스트림 소비 핸들러와 **같은 배선**(`_process` → `process_request`)을 태운다 — 상태 이벤트(§1.2)도 동일하게
+  발행되므로 두 경로의 작업량이 같아 공정 비교가 성립한다. `delivery_count=1` 고정(포기 규칙 §4 미발동)
+- 2xx 판정은 처리 후 DB 상태 재조회: `EMBEDDED` → 200(이미 EMBEDDED였던 중복 호출도 200 — 멱등, §2.4와 일치),
+  상태 없음 → 404, `FAILED` → 500(error_message 노출), 비종결 → 409
+- 서버는 FastStream 0.7 내장 `AsgiFastStream` + uvicorn — FastAPI 미도입(고정 경로 1개에 프레임워크 추가는 과함)
+
+### 11.3 부하 테스트용 fake 지연
+
+- `KKORI_WORKER_FAKE_DELAY_SECONDS`(기본 0 = 지연 없음, 기존 동작 동일) — fake 제공자로 실제 LLM 호출 없이
+  분석 시간을 재현한다. **분석 1건당 총 지연 ≈ 이 값**: `FakeEmbedder.embed_documents`에만 적용하며, 임베딩
+  단계는 FULL/REINDEX 어느 경로든 종단 전 정확히 1회 지나므로 경로와 무관하게 +N초가 된다
+- 지연은 `time.sleep`으로 구현한다 — 제공자는 sync 메서드이고 파이프라인이 `asyncio.to_thread`로 호출하므로
+  이벤트 루프를 막지 않고, 실제 Bedrock 경로(동일하게 to_thread 경유 sync 호출)와 같은 스레드풀 동시성 특성을
+  재현한다. (백엔드 실험 문서의 "asyncio.sleep" 문구는 이 호출 구조를 전제하지 않은 것 — 동시성 왜곡 없음이 요지)
+- 지연값은 동기·비동기 양쪽에 같은 값으로 적용해야 변인이 통제된다. N < 120(Spring read timeout) 유지가 전제
+
 ## 결정 이력
 
 > 근거·트레이드오프 상세는 개인 결정 노트(로컬, 커밋 대상 아님)에 기록. 이 문서에는 확정 사실만 남긴다.
@@ -348,3 +390,6 @@ at-least-once + XAUTOCLAIM 회수는 **실제로 죽지 않은 원본과 회수�
   1024 지정, `vector(1024)` 스키마 유지). 리전은 서울로 정했다가 **같은 날 번복 — 조직 SCP 가 us-east-1 만
   허용**(서울·cross-region 프로파일 전부 명시적 거부, 실 호출 탐침으로 확인) → **us-east-1 확정**.
   Embed v4 실 호출 검증 완료(1024차원 + 의미 유사도 동작). → §8.
+- 2026-09-01 동기 HTTP 디스패치 실험(HBB1-327): 이력서 워커를 AsgiFastStream으로 전환해 스트림 소비와 같은
+  프로세스에 `POST /internal/analyses/resume` 서빙, fake 지연(`fake_delay_seconds`) 도입. 실험 장치 — 종료 후
+  제거 가능. → §11.
