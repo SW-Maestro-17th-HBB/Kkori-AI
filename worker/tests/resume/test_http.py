@@ -6,16 +6,18 @@ HTTP 파싱·라우팅은 test_main 배선 테스트가, 처리·판정은 `anal
 검증한다(`reclaim_one` 직접 호출 테스트와 같은 스타일).
 """
 
+import asyncio
 import json
 
 import pytest
 
 import src.main as main
 from src.ai import FakeEmbedder, FakeEnricher, FakeStructurer
+from src.config import Settings
 from src.contract import AnalysisMode, AnalysisStatus, ParseRequest
 from src.contract.structured_data import StructuredData
-from src.storage.repository import count_chunks, get_parse_status
-from tests.conftest import DIM, requires_postgres, seed_resume
+from src.storage.repository import count_chunks, create_pool, get_parse_status
+from tests.conftest import DIM, TEST_DSN, requires_postgres, seed_resume
 from tests.resume.test_main import _call_asgi, _FakeRedis
 from tests.resume.test_pipeline import SD
 
@@ -122,6 +124,105 @@ async def test_처리중_예외는_500과_에러노출(conn, wired, monkeypatch)
     assert resp.status_code == 500
     # 실패를 숨기지 않는다 — 원인(예외 타입·메시지)이 바디에 보여야 한다 (§11.1)
     assert "RuntimeError" in _body(resp)["error"]
+
+
+# ------------------------------------------------- 커넥션 풀 (§11.4)
+
+
+@pytest.fixture
+def wired_providers(conn, monkeypatch):
+    """AI 자원만 배선 — `_Resources.db` 는 비워서 analyze_sync 가 실제 풀 경로를 탄다."""
+    monkeypatch.setattr(main._Resources, "embedder", FakeEmbedder(dim=DIM))
+    monkeypatch.setattr(
+        main._Resources, "structurer", FakeStructurer(StructuredData.model_validate(SD))
+    )
+    monkeypatch.setattr(main._Resources, "enricher", FakeEnricher())
+    monkeypatch.setattr(main.settings, "embedding_dim", DIM)
+
+
+async def _open_pool(max_size: int):
+    pool = create_pool(Settings(postgres_dsn=TEST_DSN), max_size=max_size)
+    await pool.open()
+    return pool
+
+
+@pytest.mark.asyncio
+async def test_풀_경유_동기호출_200과_EMBEDDED(conn, wired_providers, monkeypatch):
+    """풀에서 빌린 연결로 파이프라인·상태 재조회까지 실제 전 구간 검증."""
+    rid = await seed_resume(conn, AnalysisStatus.EMBEDDING, SD)
+    pool = await _open_pool(2)
+    monkeypatch.setattr(main._Resources, "pool", pool)
+    try:
+        resp = await main.analyze_sync(_request(rid), _FakeRedis())
+        assert resp.status_code == 200
+        assert await get_parse_status(conn, rid) == "EMBEDDED"
+        assert await count_chunks(conn, rid) == 3
+    finally:
+        await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_동시_300요청에도_DB연결은_상한_이하(conn, wired_providers, monkeypatch):
+    """수용 기준: 동시 300건에도 PG 연결 ≤ 풀 상한 — too many clients 구조적 불가."""
+    rid = await seed_resume(conn, AnalysisStatus.EMBEDDED, SD)  # 스킵 경로 — 처리 자체는 단순화
+    pool = await _open_pool(5)
+    monkeypatch.setattr(main._Resources, "pool", pool)
+
+    async def slow_process(*args, **kwargs):  # 연결을 쥔 채 머무는 시간을 만든다
+        await asyncio.sleep(0.05)
+
+    monkeypatch.setattr(main, "process_request", slow_process)
+
+    peak = 0
+    stop = asyncio.Event()
+
+    async def watch_connections():
+        nonlocal peak
+        while not stop.is_set():
+            cur = await conn.execute(
+                "SELECT count(*) AS n FROM pg_stat_activity WHERE datname = current_database()"
+            )
+            peak = max(peak, (await cur.fetchone())["n"])
+            await asyncio.sleep(0.02)
+
+    watcher = asyncio.create_task(watch_connections())
+    try:
+        responses = await asyncio.gather(
+            *[main.analyze_sync(_request(rid), _FakeRedis()) for _ in range(300)]
+        )
+    finally:
+        stop.set()
+        await watcher
+        await pool.close()
+
+    assert [r.status_code for r in responses] == [200] * 300  # too many clients 였다면 500
+    # 풀 5 + 관측용 conn 픽스처 1 (+여유 1) — 유입 300 과 무관하게 유한
+    assert peak <= 5 + 2, f"피크 연결 수 {peak} — 상한 초과"
+
+
+@pytest.mark.asyncio
+async def test_풀_대기_초과는_503(conn, wired_providers, monkeypatch):
+    """연결 1개를 다른 요청이 쥐고 있으면 타임아웃까지 대기 후 503."""
+    rid = await seed_resume(conn, AnalysisStatus.EMBEDDED, SD)
+    pool = await _open_pool(1)
+    monkeypatch.setattr(main._Resources, "pool", pool)
+    monkeypatch.setattr(main.settings, "sync_pool_wait_timeout_s", 0.05)
+
+    async def slow_process(*args, **kwargs):
+        await asyncio.sleep(0.5)
+
+    monkeypatch.setattr(main, "process_request", slow_process)
+
+    try:
+        first = asyncio.create_task(main.analyze_sync(_request(rid), _FakeRedis()))
+        await asyncio.sleep(0.1)  # 첫 요청이 유일한 연결을 잡을 시간
+        second = await main.analyze_sync(_request(rid), _FakeRedis())
+
+        assert second.status_code == 503
+        assert "대기 초과" in _body(second)["error"]
+        assert (await first).status_code == 200  # 먼저 빌린 쪽은 정상 완료
+    finally:
+        await pool.close()
 
 
 @pytest.mark.asyncio

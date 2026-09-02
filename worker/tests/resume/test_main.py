@@ -9,8 +9,10 @@ import json
 import pytest
 
 from faststream.asgi import AsgiFastStream
+from psycopg_pool import PoolTimeout
 
-from src.contract import AnalysisStatus, StatusChanged
+import src.main as main
+from src.contract import AnalysisMode, AnalysisStatus, ParseRequest, StatusChanged
 from src.main import SYNC_ANALYZE_PATH, app, broker, handle_parse_requested, publish_status
 
 
@@ -111,3 +113,20 @@ async def test_동기엔드포인트_GET_은_405():
 async def test_미등록_경로는_404():
     status, _ = await _call_asgi(app, "POST", "/없는/경로")
     assert status == 404
+
+
+@pytest.mark.asyncio
+async def test_동기엔드포인트_풀_대기초과는_503(monkeypatch):
+    """연결이 전부 대출 중이라 타임아웃까지 기다려도 못 빌리면 503 (§11.4)."""
+
+    class _ExhaustedPool:
+        def connection(self, timeout=None):
+            raise PoolTimeout("풀 대기 초과")
+
+    monkeypatch.setattr(main._Resources, "pool", _ExhaustedPool())
+    request = ParseRequest(resumeId=1, userId=1, bucket="b", objectKey="k", mode=AnalysisMode.REINDEX)
+
+    resp = await main.analyze_sync(request, redis=None)  # 풀 대기에서 끝나 redis 는 안 쓰임
+
+    assert resp.status_code == 503
+    assert "대기 초과" in json.loads(resp.body)["error"]
