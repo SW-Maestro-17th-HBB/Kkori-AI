@@ -79,6 +79,13 @@ class Settings(BaseSettings):
     # fake 제공자의 인위 지연 — 분석 1건당 총 지연 ≈ 이 값 (FakeEmbedder.embed_documents 에만
     # 적용, 임베딩 단계는 FULL/REINDEX 어느 경로든 종단 전 정확히 1회). 0 = 지연 없음(기존 동작).
     fake_delay_seconds: float = 0.0
+    # 동기 HTTP 경로 전용 커넥션 풀의 최대 연결 수 (§11.4) — 동시 처리·DB 연결 상한이자
+    # 처리량 노브(≈ max_size ÷ 건당 처리 시간). 단 실효 동시 추론은 to_thread 스레드풀
+    # 크기 min(32, cpu+4)와의 min 이므로 측정 시 그 이하로 잡을 것.
+    sync_pool_max_size: int = 10
+    # 풀 대기 타임아웃(초) — 연결이 전부 대출 중일 때 이만큼 기다리다 503 으로 거절.
+    # 대기 + 처리 시간이 Spring read timeout(120s) 안에 들도록 정한다.
+    sync_pool_wait_timeout_s: float = 60.0
 
     # --- 청킹 (§2.5) ---
     chunk_target_tokens: int = 512  # 초과 엔티티만 문장 경계로 분할

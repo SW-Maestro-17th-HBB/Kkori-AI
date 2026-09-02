@@ -21,6 +21,7 @@ from pgvector.psycopg import register_vector_async
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
+from psycopg_pool import AsyncConnectionPool
 
 from src.analysis.chunking import Chunk
 from src.config import Settings
@@ -43,6 +44,28 @@ async def connect(settings: Settings) -> AsyncConnection:
     await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
     await register_vector_async(conn)
     return conn
+
+
+async def _configure_pooled(conn: AsyncConnection) -> None:
+    await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+    await register_vector_async(conn)
+
+
+def create_pool(settings: Settings, max_size: int) -> AsyncConnectionPool:
+    """`connect()` 와 동일한 세션 설정(autocommit·dict_row·pgvector)의 커넥션 풀 (§11.4).
+
+    동기 HTTP 경로 전용 — 유입량과 무관하게 DB 연결을 max_size 이하로 유지한다.
+    스트림 소비 경로는 순차라 기존 `connect()` 를 그대로 쓴다.
+    호출자가 `await pool.open()` / `await pool.close()` 로 수명을 관리한다.
+    """
+    return AsyncConnectionPool(
+        settings.postgres_dsn,
+        min_size=1,
+        max_size=max_size,
+        kwargs={"autocommit": True, "row_factory": dict_row},
+        configure=_configure_pooled,
+        open=False,
+    )
 
 
 # ---------------------------------------------------------------- 스키마 (워커 소유)

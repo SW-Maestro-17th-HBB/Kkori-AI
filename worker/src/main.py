@@ -18,6 +18,8 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from psycopg import AsyncConnection
+from psycopg_pool import PoolTimeout
 from pydantic import ValidationError
 from redis.asyncio import Redis
 
@@ -37,6 +39,7 @@ from src.messaging.pel import get_delivery_count
 from src.messaging.streams import publish_status
 from src.storage.repository import (
     connect,
+    create_pool,
     ensure_schema,
     get_error_message,
     get_parse_status,
@@ -59,6 +62,7 @@ class _Resources:
     """
 
     db = None  # 테스트 주입용 psycopg AsyncConnection (프로덕션은 요청당 연결)
+    pool = None  # 동기 HTTP 경로 전용 커넥션 풀 (§11.4) — 스트림 경로는 쓰지 않음
     embedder: Embedder | None = None
     structurer: Structurer | None = None
     enricher: Enricher | None = None
@@ -81,15 +85,21 @@ async def _process(
     redis: Redis,
     *,
     is_reclaimed: bool = False,
+    conn: AsyncConnection | None = None,
 ) -> None:
-    """파이프라인 호출 배선 — 공유 자원·발행 콜백을 묶는다."""
+    """파이프라인 호출 배선 — 공유 자원·발행 콜백을 묶는다.
+
+    `conn` 이 주어지면(동기 HTTP 경로 — 풀에서 빌린 연결) 그걸 쓰고 닫지 않는다.
+    없으면 요청당 커넥션을 연다 — 공유 세션의 트랜잭션 섞임 방지 (§3.3, 스트림 경로).
+    """
 
     async def publish(rid: int, uid: int, status: AnalysisStatus, message: str) -> None:
         await publish_status(redis, rid, uid, status, message)
 
-    # 요청당 커넥션 — 공유 세션의 트랜잭션 섞임 방지 (테스트가 주입한 커넥션은 재사용·비소유)
-    injected = _Resources.db is not None
-    conn = _Resources.db if injected else await connect(settings)
+    # 소유권: 이 함수가 직접 연 커넥션만 닫는다 (주입·풀 대여분은 호출자/풀 소유)
+    injected = conn is not None or _Resources.db is not None
+    if conn is None:
+        conn = _Resources.db if _Resources.db is not None else await connect(settings)
     try:
         await process_request(
             request,
@@ -126,6 +136,15 @@ async def startup() -> None:
     _Resources.structurer = build_structurer(settings)
     _Resources.enricher = build_enricher(settings)
     _Resources.s3 = build_s3_client(settings)
+    _Resources.pool = create_pool(settings, max_size=settings.sync_pool_max_size)
+    await _Resources.pool.open()
+
+
+@app.on_shutdown
+async def shutdown() -> None:
+    if _Resources.pool is not None:
+        await _Resources.pool.close()
+        _Resources.pool = None
 
 
 async def _delivery_count_of(redis: Redis, msg: RedisStreamMessage) -> int:
@@ -230,14 +249,41 @@ async def handle_sync_analyze(request: Request) -> AsgiResponse:
 
 
 async def analyze_sync(request: ParseRequest, redis: Redis) -> AsgiResponse:
-    """동기 처리 배선 — 스트림 경로와 같은 `_process` 를 태우고 종단 상태로 응답을 가른다.
+    """동기 처리 배선 — 풀에서 연결을 빌려 처리 전 구간에 쓴다 (§11.4).
+
+    요청마다 새 연결을 열지 않으므로 동시 요청이 몰려도 DB 연결은
+    `sync_pool_max_size` 를 넘지 않는다. 연결이 전부 대출 중이면 대기하다
+    `sync_pool_wait_timeout_s` 초과 시 503 — Spring 이 비-2xx 로 FAILED 전이한다.
+    """
+    if _Resources.db is not None:  # 테스트 주입 커넥션 — 풀 우회
+        return await _analyze_with_conn(request, redis, _Resources.db)
+    try:
+        async with _Resources.pool.connection(
+            timeout=settings.sync_pool_wait_timeout_s
+        ) as conn:
+            return await _analyze_with_conn(request, redis, conn)
+    except PoolTimeout:
+        logger.warning("동기 분석 대기 초과 (resumeId=%s)", request.resumeId)
+        return JSONResponse(
+            {
+                "resumeId": request.resumeId,
+                "error": f"동시 처리 상한 대기 초과({settings.sync_pool_wait_timeout_s}s)",
+            },
+            503,
+        )
+
+
+async def _analyze_with_conn(
+    request: ParseRequest, redis: Redis, conn: AsyncConnection
+) -> AsgiResponse:
+    """스트림 경로와 같은 `_process` 를 태우고 종단 상태로 응답을 가른다.
 
     상태 이벤트도 동일하게 발행되어 두 경로의 작업량이 같다(§11.2 공정 비교 조건).
     프레임워크(HttpHandler)의 포괄 500 은 에러 내용을 숨기므로 여기서 직접 잡아 노출한다
     — 비-2xx 시 FAILED 전이는 호출자(Spring) 책임이라 실패 원인이 보여야 한다.
     """
     try:
-        await _process(request, delivery_count=1, redis=redis)
+        await _process(request, delivery_count=1, redis=redis, conn=conn)
     except Exception as e:
         logger.exception("동기 분석 실패 (resumeId=%s)", request.resumeId)
         return JSONResponse(
@@ -245,14 +291,8 @@ async def analyze_sync(request: ParseRequest, redis: Redis) -> AsgiResponse:
         )
 
     # process_request 는 유령·REINDEX 계약 위반에서도 예외 없이 반환하므로 상태 재조회로 판정
-    injected = _Resources.db is not None
-    conn = _Resources.db if injected else await connect(settings)
-    try:
-        status = await get_parse_status(conn, request.resumeId)
-        error = await get_error_message(conn, request.resumeId) if status == AnalysisStatus.FAILED else None
-    finally:
-        if not injected:
-            await conn.close()
+    status = await get_parse_status(conn, request.resumeId)
+    error = await get_error_message(conn, request.resumeId) if status == AnalysisStatus.FAILED else None
 
     body = {"resumeId": request.resumeId, "status": status}
     if status == AnalysisStatus.EMBEDDED:  # 이미 EMBEDDED 였던 중복 호출도 200 — 멱등(§2.4)
