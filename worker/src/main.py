@@ -89,11 +89,11 @@ async def _process(
 ) -> None:
     """파이프라인 호출 배선 — 공유 자원·발행 콜백을 묶는다.
 
-    커넥션 선택 우선순위 (§11.4 — 대여분은 각 소유자가 닫는다):
-    1. `conn` 인자 — HTTP 경로가 풀에서 빌려 넘긴 연결 (상태 재조회까지 같이 쓰려고)
+    커넥션 선택 우선순위 (§11.4 — 커넥션은 가져온 쪽이 반환한다):
+    1. `conn` 인자 — HTTP 경로가 풀에서 가져와 넘긴 커넥션 (상태 재조회까지 같이 쓰려고)
     2. `_Resources.db` — 테스트 주입
-    3. `_Resources.pool` 대여 — 스트림·회수 경로. 못 빌리면 예외 → ACK 없음 → PEL 회수
-    4. 요청당 fresh 연결 — 풀 없는 테스트 폴백 (공유 세션의 트랜잭션 섞임 방지, §3.3)
+    3. `_Resources.pool` 에서 가져옴 — 스트림·회수 경로. 못 가져오면 예외 → ACK 없음 → PEL 회수
+    4. 요청당 새 커넥션 — 풀 없는 테스트 폴백 (공유 세션의 트랜잭션 섞임 방지, §3.3)
     """
 
     async def publish(rid: int, uid: int, status: AnalysisStatus, message: str) -> None:
@@ -265,11 +265,11 @@ async def handle_sync_analyze(request: Request) -> AsgiResponse:
 
 
 async def analyze_sync(request: ParseRequest, redis: Redis) -> AsgiResponse:
-    """동기 처리 배선 — 풀에서 연결을 빌려 처리 전 구간에 쓴다 (§11.4).
+    """동기 처리 배선 — 풀에서 커넥션을 가져와 처리 전 구간에 쓴다 (§11.4).
 
-    요청마다 새 연결을 열지 않으므로 동시 요청이 몰려도 DB 연결은
-    `db_pool_max_size` 를 넘지 않는다. 연결이 전부 대출 중이면 대기하다
-    `db_pool_wait_timeout_s` 초과 시 503 — Spring 이 비-2xx 로 FAILED 전이한다.
+    요청마다 새 커넥션을 열지 않으므로 동시 요청이 몰려도 PG 커넥션은
+    `db_pool_max_size` 를 넘지 않는다. 커넥션을 전부 사용 중이면
+    `db_pool_wait_timeout_s` 까지 기다리다가 503 — Spring 이 비-2xx 를 받아 FAILED 로 바꾼다.
     """
     if _Resources.db is not None:  # 테스트 주입 커넥션 — 풀 우회
         return await _analyze_with_conn(request, redis, _Resources.db)

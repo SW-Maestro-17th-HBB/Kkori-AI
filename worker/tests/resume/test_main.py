@@ -133,7 +133,7 @@ def test_max_workers_배선_동시_구독자_생성():
 
 @pytest.mark.asyncio
 async def test_동기엔드포인트_풀_대기초과는_503(monkeypatch):
-    """연결이 전부 대출 중이라 타임아웃까지 기다려도 못 빌리면 503 (§11.4)."""
+    """커넥션을 전부 사용 중이라 타임아웃까지 기다려도 못 가져오면 503 (§11.4)."""
 
     class _ExhaustedPool:
         def connection(self, timeout=None):

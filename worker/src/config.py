@@ -77,14 +77,14 @@ class Settings(BaseSettings):
     retry_base_delay_s: float = 1.0  # 지수 백오프 시작 간격 — 1s → 2s → 4s
 
     # --- 동기 디스패치 실험 (§11) ---
-    # fake 제공자의 인위 지연 — 분석 1건당 총 지연 ≈ 이 값 (FakeEmbedder.embed_documents 에만
+    # fake 제공자에 일부러 주는 지연 — 분석 1건당 총 지연 ≈ 이 값 (FakeEmbedder.embed_documents 에만
     # 적용, 임베딩 단계는 FULL/REINDEX 어느 경로든 종단 전 정확히 1회). 0 = 지연 없음(기존 동작).
     fake_delay_seconds: float = 0.0
     # 커넥션 풀 최대 연결 수 (§11.4) — HTTP·스트림 두 경로가 공유하므로 워커의 PG 연결
     # 총량이 이 값으로 묶인다. 동시 처리 상한이자 처리량 노브(≈ 동시성 ÷ 건당 처리 시간).
     # 단 실효 동시 추론은 to_thread 스레드풀 크기 min(32, cpu+4)와의 min — 측정 시 그 이하로.
     db_pool_max_size: int = 10
-    # 풀 대기 타임아웃(초) — 연결이 전부 대출 중일 때 이만큼 기다린 뒤 HTTP 는 503,
+    # 풀 대기 타임아웃(초) — 커넥션을 전부 사용 중일 때 이만큼 기다린 뒤 HTTP 는 503,
     # 스트림은 예외 → PEL 회수. 대기 + 처리 시간이 Spring read timeout(120s) 안에 들도록.
     db_pool_wait_timeout_s: float = 60.0
     # 스트림 소비 동시 처리 수 (§11.4) — 1 = 순차(기존 동작). 풀 크기 이하여야 한다

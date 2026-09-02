@@ -96,7 +96,7 @@ class FakeEmbedder:
     같은 텍스트 → 항상 같은 벡터, 다른 텍스트 → 다른 벡터. 값은 [0, 1] 범위.
     임베딩 '품질'은 없음 — 파이프라인 로직 검증 전용.
 
-    `delay_s` 는 부하 테스트용 인위 지연(PRD §11.3) — 분석 1건당 1회인 embed_documents
+    `delay_s` 는 부하 테스트용 지연(PRD §11.3) — 분석 1건당 1회인 embed_documents
     에만 적용해 종단까지 추가 지연 ≈ delay_s 가 된다. sync 메서드의 `time.sleep` 이지만
     파이프라인이 `asyncio.to_thread` 로 부르므로 이벤트 루프를 막지 않는다.
     """

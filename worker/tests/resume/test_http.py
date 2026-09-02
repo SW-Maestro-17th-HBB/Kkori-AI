@@ -163,7 +163,7 @@ async def test_풀_경유_동기호출_200과_EMBEDDED(conn, wired_providers, mo
 
 @pytest.mark.asyncio
 async def test_스트림_경로도_풀에서_연결을_빌린다(conn, wired_providers, monkeypatch):
-    """conn 인자·주입 없이 `_process` 를 부르면(스트림 경로와 동일) 풀 대여 브랜치를 탄다 (§11.4)."""
+    """conn 인자·주입 없이 `_process` 를 부르면(스트림 경로와 동일) 풀에서 커넥션을 가져온다 (§11.4)."""
     rid = await seed_resume(conn, AnalysisStatus.EMBEDDING, SD)
     pool = await _open_pool(2)
     monkeypatch.setattr(main._Resources, "pool", pool)
