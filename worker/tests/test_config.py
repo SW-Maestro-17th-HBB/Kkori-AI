@@ -32,3 +32,15 @@ def test_s3_endpoint_빈값은_None(monkeypatch):
 
 def test_get_settings_캐시_동일_인스턴스():
     assert get_settings() is get_settings()
+
+
+def test_stream_max_workers_가_풀_크기를_넘으면_기동_실패():
+    import pytest
+
+    with pytest.raises(ValueError, match="db_pool_max_size"):
+        Settings(stream_max_workers=11, db_pool_max_size=10)
+
+
+def test_stream_max_workers_가_풀_크기_이하면_정상():
+    s = Settings(stream_max_workers=10, db_pool_max_size=10)
+    assert s.stream_max_workers == 10

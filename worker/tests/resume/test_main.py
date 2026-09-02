@@ -115,6 +115,22 @@ async def test_미등록_경로는_404():
     assert status == 404
 
 
+def test_max_workers_배선_동시_구독자_생성():
+    """stream_max_workers > 1 이면 동시 소비 구독자가 되는 배선을 고정 (§11.4).
+
+    기본값 1 은 기존 순차 구독자 그대로 — 설정 없이는 동작이 안 바뀐다.
+    """
+    from faststream.redis import RedisBroker, StreamSub
+    from faststream.redis.subscriber.usecases import StreamConcurrentSubscriber, StreamSubscriber
+
+    b = RedisBroker("redis://localhost:6379")
+    concurrent = b.subscriber(stream=StreamSub("t", group="g", consumer="c"), max_workers=3)
+    sequential = b.subscriber(stream=StreamSub("t2", group="g", consumer="c"), max_workers=1)
+
+    assert type(concurrent) is StreamConcurrentSubscriber
+    assert type(sequential) is StreamSubscriber
+
+
 @pytest.mark.asyncio
 async def test_동기엔드포인트_풀_대기초과는_503(monkeypatch):
     """연결이 전부 대출 중이라 타임아웃까지 기다려도 못 빌리면 503 (§11.4)."""

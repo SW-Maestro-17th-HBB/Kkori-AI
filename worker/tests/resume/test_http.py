@@ -162,6 +162,22 @@ async def test_풀_경유_동기호출_200과_EMBEDDED(conn, wired_providers, mo
 
 
 @pytest.mark.asyncio
+async def test_스트림_경로도_풀에서_연결을_빌린다(conn, wired_providers, monkeypatch):
+    """conn 인자·주입 없이 `_process` 를 부르면(스트림 경로와 동일) 풀 대여 브랜치를 탄다 (§11.4)."""
+    rid = await seed_resume(conn, AnalysisStatus.EMBEDDING, SD)
+    pool = await _open_pool(2)
+    monkeypatch.setattr(main._Resources, "pool", pool)
+    try:
+        await main._process(_request(rid), delivery_count=1, redis=_FakeRedis())
+
+        assert await get_parse_status(conn, rid) == "EMBEDDED"
+        stats = pool.get_stats()
+        assert stats["pool_size"] == stats["pool_available"]  # 빌린 연결이 반납됐다
+    finally:
+        await pool.close()
+
+
+@pytest.mark.asyncio
 async def test_동시_300요청에도_DB연결은_상한_이하(conn, wired_providers, monkeypatch):
     """수용 기준: 동시 300건에도 PG 연결 ≤ 풀 상한 — too many clients 구조적 불가."""
     rid = await seed_resume(conn, AnalysisStatus.EMBEDDED, SD)  # 스킵 경로 — 처리 자체는 단순화
