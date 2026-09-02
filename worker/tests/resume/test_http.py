@@ -206,7 +206,7 @@ async def test_풀_대기_초과는_503(conn, wired_providers, monkeypatch):
     rid = await seed_resume(conn, AnalysisStatus.EMBEDDED, SD)
     pool = await _open_pool(1)
     monkeypatch.setattr(main._Resources, "pool", pool)
-    monkeypatch.setattr(main.settings, "sync_pool_wait_timeout_s", 0.05)
+    monkeypatch.setattr(main.settings, "db_pool_wait_timeout_s", 0.05)
 
     async def slow_process(*args, **kwargs):
         await asyncio.sleep(0.5)

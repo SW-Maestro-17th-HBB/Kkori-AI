@@ -13,6 +13,7 @@ from __future__ import annotations
 import socket
 from functools import lru_cache
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -79,18 +80,32 @@ class Settings(BaseSettings):
     # fake 제공자의 인위 지연 — 분석 1건당 총 지연 ≈ 이 값 (FakeEmbedder.embed_documents 에만
     # 적용, 임베딩 단계는 FULL/REINDEX 어느 경로든 종단 전 정확히 1회). 0 = 지연 없음(기존 동작).
     fake_delay_seconds: float = 0.0
-    # 동기 HTTP 경로 전용 커넥션 풀의 최대 연결 수 (§11.4) — 동시 처리·DB 연결 상한이자
-    # 처리량 노브(≈ max_size ÷ 건당 처리 시간). 단 실효 동시 추론은 to_thread 스레드풀
-    # 크기 min(32, cpu+4)와의 min 이므로 측정 시 그 이하로 잡을 것.
-    sync_pool_max_size: int = 10
-    # 풀 대기 타임아웃(초) — 연결이 전부 대출 중일 때 이만큼 기다리다 503 으로 거절.
-    # 대기 + 처리 시간이 Spring read timeout(120s) 안에 들도록 정한다.
-    sync_pool_wait_timeout_s: float = 60.0
+    # 커넥션 풀 최대 연결 수 (§11.4) — HTTP·스트림 두 경로가 공유하므로 워커의 PG 연결
+    # 총량이 이 값으로 묶인다. 동시 처리 상한이자 처리량 노브(≈ 동시성 ÷ 건당 처리 시간).
+    # 단 실효 동시 추론은 to_thread 스레드풀 크기 min(32, cpu+4)와의 min — 측정 시 그 이하로.
+    db_pool_max_size: int = 10
+    # 풀 대기 타임아웃(초) — 연결이 전부 대출 중일 때 이만큼 기다린 뒤 HTTP 는 503,
+    # 스트림은 예외 → PEL 회수. 대기 + 처리 시간이 Spring read timeout(120s) 안에 들도록.
+    db_pool_wait_timeout_s: float = 60.0
+    # 스트림 소비 동시 처리 수 (§11.4) — 1 = 순차(기존 동작). 풀 크기 이하여야 한다
+    # (초과하면 연결 대기로 동시성이 조용히 풀 크기로 깎이므로 기동 시 검증).
+    stream_max_workers: int = 1
 
     # --- 청킹 (§2.5) ---
     chunk_target_tokens: int = 512  # 초과 엔티티만 문장 경계로 분할
     chunk_overlap_sentences: int = 1  # 분할 조각 간 겹침
     chunk_version: int = 3  # metadata.chunk_version — 색인 스키마 버전 (3 = 성과 단위 청킹+풍부화)
+
+    @model_validator(mode="after")
+    def _validate_workers_within_pool(self) -> "Settings":
+        """N ≤ P 기동 검증 (§11.4) — 잘못된 조합이 조용히 성능만 깎는 일을 막는다."""
+        if self.stream_max_workers > self.db_pool_max_size:
+            raise ValueError(
+                f"stream_max_workers({self.stream_max_workers})는 "
+                f"db_pool_max_size({self.db_pool_max_size}) 이하여야 한다 — "
+                "스트림 동시 작업이 풀보다 많으면 연결 대기로 동시성이 풀 크기로 깎인다"
+            )
+        return self
 
     @property
     def resolved_consumer_name(self) -> str:

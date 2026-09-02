@@ -54,15 +54,15 @@ app = AsgiFastStream(broker)
 
 
 class _Resources:
-    """기동 시 준비되는 공유 자원 (AI 제공자·S3).
+    """기동 시 준비되는 공유 자원 (AI 제공자·S3·커넥션 풀).
 
-    DB 는 공유 커넥션을 두지 않는다 — 두 구독자(새 메시지·회수)가 동시에 돌 때 한 세션의
-    트랜잭션을 공유하면 서로의 작업을 커밋할 수 있어, **요청당 커넥션**을 연다(§3.3 안전).
-    `db` 는 테스트 주입용(주입되면 그걸 쓰고 닫지 않음). 물량이 늘면 커넥션 풀로 교체.
+    DB 는 공유 커넥션을 두지 않는다 — 동시 작업들이 한 세션의 트랜잭션을 공유하면
+    서로의 작업을 커밋할 수 있어(§3.3 안전), **작업당 풀에서 전용 연결을 빌려** 쓴다.
+    `db` 는 테스트 주입용(주입되면 그걸 쓰고 닫지 않음).
     """
 
-    db = None  # 테스트 주입용 psycopg AsyncConnection (프로덕션은 요청당 연결)
-    pool = None  # 동기 HTTP 경로 전용 커넥션 풀 (§11.4) — 스트림 경로는 쓰지 않음
+    db = None  # 테스트 주입용 psycopg AsyncConnection
+    pool = None  # HTTP·스트림 두 경로가 공유하는 커넥션 풀 (§11.4) — PG 연결 총량 = 풀 크기
     embedder: Embedder | None = None
     structurer: Structurer | None = None
     enricher: Enricher | None = None
@@ -89,40 +89,53 @@ async def _process(
 ) -> None:
     """파이프라인 호출 배선 — 공유 자원·발행 콜백을 묶는다.
 
-    `conn` 이 주어지면(동기 HTTP 경로 — 풀에서 빌린 연결) 그걸 쓰고 닫지 않는다.
-    없으면 요청당 커넥션을 연다 — 공유 세션의 트랜잭션 섞임 방지 (§3.3, 스트림 경로).
+    커넥션 선택 우선순위 (§11.4 — 대여분은 각 소유자가 닫는다):
+    1. `conn` 인자 — HTTP 경로가 풀에서 빌려 넘긴 연결 (상태 재조회까지 같이 쓰려고)
+    2. `_Resources.db` — 테스트 주입
+    3. `_Resources.pool` 대여 — 스트림·회수 경로. 못 빌리면 예외 → ACK 없음 → PEL 회수
+    4. 요청당 fresh 연결 — 풀 없는 테스트 폴백 (공유 세션의 트랜잭션 섞임 방지, §3.3)
     """
 
     async def publish(rid: int, uid: int, status: AnalysisStatus, message: str) -> None:
         await publish_status(redis, rid, uid, status, message)
 
-    # 소유권: 이 함수가 직접 연 커넥션만 닫는다 (주입·풀 대여분은 호출자/풀 소유)
-    injected = conn is not None or _Resources.db is not None
-    if conn is None:
-        conn = _Resources.db if _Resources.db is not None else await connect(settings)
-    try:
-        await process_request(
-            request,
-            conn=conn,
-            embedder=_Resources.embedder,
-            structurer=_Resources.structurer,
-            enricher=_Resources.enricher,
-            fetch_text=fetch_text,
-            publish=publish,
-            settings=settings,
-            delivery_count=delivery_count,
-            is_reclaimed=is_reclaimed,
-        )
-    except Exception as e:
-        # 예상 밖 예외도 원인을 DB 에 남기고(§4 합류용, best-effort) 원래대로 전파한다
-        # — 전파돼야 ACK 없이 끝나 PEL 재전달(회수)로 이어진다.
-        # DB 에는 예외 타입명만 기록: 원문에는 접속 문자열 등 내부 정보가 섞일 수 있고,
-        # error_message 는 백엔드 조회 API 로 노출될 수 있다. 원문 전체는 로그가 담당.
-        await record_last_error(conn, request.resumeId, type(e).__name__)
-        raise
-    finally:
-        if not injected:
-            await conn.close()
+    async def run(conn: AsyncConnection) -> None:
+        try:
+            await process_request(
+                request,
+                conn=conn,
+                embedder=_Resources.embedder,
+                structurer=_Resources.structurer,
+                enricher=_Resources.enricher,
+                fetch_text=fetch_text,
+                publish=publish,
+                settings=settings,
+                delivery_count=delivery_count,
+                is_reclaimed=is_reclaimed,
+            )
+        except Exception as e:
+            # 예상 밖 예외도 원인을 DB 에 남기고(§4 합류용, best-effort) 원래대로 전파한다
+            # — 전파돼야 ACK 없이 끝나 PEL 재전달(회수)로 이어진다.
+            # DB 에는 예외 타입명만 기록: 원문에는 접속 문자열 등 내부 정보가 섞일 수 있고,
+            # error_message 는 백엔드 조회 API 로 노출될 수 있다. 원문 전체는 로그가 담당.
+            await record_last_error(conn, request.resumeId, type(e).__name__)
+            raise
+
+    if conn is not None:
+        await run(conn)
+    elif _Resources.db is not None:
+        await run(_Resources.db)
+    elif _Resources.pool is not None:
+        async with _Resources.pool.connection(
+            timeout=settings.db_pool_wait_timeout_s
+        ) as pooled:
+            await run(pooled)
+    else:
+        fresh = await connect(settings)
+        try:
+            await run(fresh)
+        finally:
+            await fresh.close()
 
 
 @app.on_startup
@@ -136,7 +149,7 @@ async def startup() -> None:
     _Resources.structurer = build_structurer(settings)
     _Resources.enricher = build_enricher(settings)
     _Resources.s3 = build_s3_client(settings)
-    _Resources.pool = create_pool(settings, max_size=settings.sync_pool_max_size)
+    _Resources.pool = create_pool(settings, max_size=settings.db_pool_max_size)
     await _Resources.pool.open()
 
 
@@ -162,7 +175,10 @@ async def _delivery_count_of(redis: Redis, msg: RedisStreamMessage) -> int:
         ParseRequest.STREAM_KEY,
         group=settings.consumer_group,
         consumer=settings.resolved_consumer_name,
-    )
+    ),
+    # 동시 소비 (§11.4) — 1 이면 기존 순차, >1 이면 StreamConcurrentSubscriber 로
+    # N 건을 동시에 처리한다. ACK 는 동시에서도 메시지별·핸들러 완료 후라 PEL 회수 설계 유지.
+    max_workers=settings.stream_max_workers,
 )
 async def handle_parse_requested(request: ParseRequest, msg: RedisStreamMessage) -> None:
     """새 분석 요청 처리 진입점.
@@ -252,14 +268,14 @@ async def analyze_sync(request: ParseRequest, redis: Redis) -> AsgiResponse:
     """동기 처리 배선 — 풀에서 연결을 빌려 처리 전 구간에 쓴다 (§11.4).
 
     요청마다 새 연결을 열지 않으므로 동시 요청이 몰려도 DB 연결은
-    `sync_pool_max_size` 를 넘지 않는다. 연결이 전부 대출 중이면 대기하다
-    `sync_pool_wait_timeout_s` 초과 시 503 — Spring 이 비-2xx 로 FAILED 전이한다.
+    `db_pool_max_size` 를 넘지 않는다. 연결이 전부 대출 중이면 대기하다
+    `db_pool_wait_timeout_s` 초과 시 503 — Spring 이 비-2xx 로 FAILED 전이한다.
     """
     if _Resources.db is not None:  # 테스트 주입 커넥션 — 풀 우회
         return await _analyze_with_conn(request, redis, _Resources.db)
     try:
         async with _Resources.pool.connection(
-            timeout=settings.sync_pool_wait_timeout_s
+            timeout=settings.db_pool_wait_timeout_s
         ) as conn:
             return await _analyze_with_conn(request, redis, conn)
     except PoolTimeout:
@@ -267,7 +283,7 @@ async def analyze_sync(request: ParseRequest, redis: Redis) -> AsgiResponse:
         return JSONResponse(
             {
                 "resumeId": request.resumeId,
-                "error": f"동시 처리 상한 대기 초과({settings.sync_pool_wait_timeout_s}s)",
+                "error": f"동시 처리 상한 대기 초과({settings.db_pool_wait_timeout_s}s)",
             },
             503,
         )
