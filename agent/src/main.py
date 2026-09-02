@@ -47,6 +47,7 @@ from src.interview.end_signal import EndSignalReceiver
 from src.interview.end_state import EndCause, EndPhase
 from src.interview.initial_question import initial_utterance, select_initial_question
 from src.interview.interview_clock import InterviewClock
+from src.interview.metrics_log import MetricsLog, flush_metrics
 from src.interview.orchestrator import decide
 from src.interview.prompts import INTERVIEWER_INSTRUCTIONS
 from src.interview.question_generation import generate_question
@@ -208,6 +209,9 @@ async def entrypoint(ctx: agents.JobContext) -> None:
 
     log = restore_plan.log if restore_plan is not None else ConversationLog()
     writer = create_transcript_writer(session_id)
+    # 메트릭 원본 수집 — 이후 생성되는 세션·LLM들이 핸들러를 등록하고,
+    # flush는 base_cleanup(모든 종료 경로)에서 수행한다
+    metrics_log = MetricsLog()
 
     interview_clock = InterviewClock(
         duration_seconds=INTERVIEW_DURATION_SECONDS,
@@ -274,6 +278,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         if writer is not None:
             await writer.aclose()
         if session_id:
+            await flush_metrics(session_id, metrics_log.rows)
             await release_owner(session_id, ctx.job.id)
 
     ctx.add_shutdown_callback(base_cleanup)
@@ -391,6 +396,9 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     question = None
     if not heading_to_close and not log.utterances:
         selection_llm = build_llm(LLM_MODEL, BEDROCK_LLM_MODEL)
+        selection_llm.on(
+            "metrics_collected", metrics_log.handler("initial_selection")
+        )
         try:
             question = await select_initial_question(
                 selection_llm, position=position, resume_context=resume_context
@@ -405,6 +413,9 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         # 부분 초기화 실패 — shutdown 콜백 등록 전이라 여기서 직접 정리한다
         await orchestrator_llm.aclose()
         raise
+    # 세션 밖 LLM 메트릭 — label이 같아 source 태그로 가른다
+    orchestrator_llm.on("metrics_collected", metrics_log.handler("orchestrator"))
+    interview_llm.on("metrics_collected", metrics_log.handler("interview"))
 
     # llm 미지정 — 훅 실행 후 프레임워크가 기본 응답 생성을 건너뛴다(이중 발화 차단).
     # 본론 질문은 TurnPipeline이 세션 밖 LLM으로 생성해 say()로 발화한다.
@@ -415,6 +426,9 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         vad=inference.VAD(),
         turn_handling=TurnHandlingOptions(turn_detection=inference.TurnDetector()),
     )
+    # STT·TTS·VAD·EOU 메트릭 수집 — EOU는 세션 이벤트로만 발행되므로(1.6.x 실코드
+    # 확인) deprecated 경고에도 세션 구독이 유일한 완전 수집 지점이다(경고 1줄 무해)
+    session.on("metrics_collected", metrics_log.handler())
 
     pipeline = TurnPipeline(
         log=log,
