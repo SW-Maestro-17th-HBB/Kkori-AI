@@ -44,3 +44,16 @@ def test_stream_max_workers_가_풀_크기를_넘으면_기동_실패():
 def test_stream_max_workers_가_풀_크기_이하면_정상():
     s = Settings(stream_max_workers=10, db_pool_max_size=10)
     assert s.stream_max_workers == 10
+
+
+def test_풀_크기_0은_기동_실패():
+    import pytest
+
+    # 검증 없이 넘어가면 startup 의 풀 생성(min_size=1 > max_size=0)에서 알 수 없는 에러로 죽는다
+    with pytest.raises(ValueError, match="1 이상"):
+        Settings(stream_max_workers=0, db_pool_max_size=0)
+
+
+def test_풀_크기_1은_정상():
+    s = Settings(stream_max_workers=1, db_pool_max_size=1)
+    assert s.db_pool_max_size == 1

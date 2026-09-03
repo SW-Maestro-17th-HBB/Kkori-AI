@@ -98,7 +98,12 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_workers_within_pool(self) -> "Settings":
-        """N ≤ P 기동 검증 (§11.4) — 잘못된 조합이 조용히 성능만 깎는 일을 막는다."""
+        """풀·동시 처리 설정 기동 검증 (§11.4) — 잘못된 값이 조용히 문제를 만들기 전에 막는다."""
+        if self.db_pool_max_size < 1:
+            raise ValueError(
+                f"db_pool_max_size({self.db_pool_max_size})는 1 이상이어야 한다 — "
+                "커넥션이 하나도 없으면 워커가 DB 를 쓸 수 없다"
+            )
         if self.stream_max_workers > self.db_pool_max_size:
             raise ValueError(
                 f"stream_max_workers({self.stream_max_workers})는 "
