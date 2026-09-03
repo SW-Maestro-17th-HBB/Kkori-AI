@@ -44,10 +44,47 @@ def test_embed_documents_순서와_개수_보존():
     assert vecs[0] == embedder.embed_query("a")
 
 
+# 지연 테스트는 실제 시간을 재지 않는다 — CI 부하에 따라 흔들리므로 sleep 호출 자체를 검증한다.
+
+
+def _record_sleep(monkeypatch) -> list[float]:
+    calls: list[float] = []
+    monkeypatch.setattr("src.ai.providers.time.sleep", calls.append)
+    return calls
+
+
+def test_가짜_임베딩_지연_기본0은_sleep_안함(monkeypatch):
+    calls = _record_sleep(monkeypatch)
+    embedder = FakeEmbedder(dim=8)
+    assert embedder.delay_s == 0.0
+    embedder.embed_documents(["a"])
+    assert calls == []
+
+
+def test_가짜_임베딩_지연_설정시_호출마다_sleep(monkeypatch):
+    calls = _record_sleep(monkeypatch)
+    embedder = FakeEmbedder(dim=8, delay_s=0.1)
+    embedder.embed_documents(["a"])
+    embedder.embed_documents(["b", "c"])  # 배치 크기와 무관하게 호출당 1회
+    assert calls == [0.1, 0.1]
+
+
+def test_embed_query는_지연_미적용(monkeypatch):
+    """지연은 분석 경로(embed_documents) 전용 — 검색 질의 임베딩은 즉시 (§11.3)."""
+    calls = _record_sleep(monkeypatch)
+    FakeEmbedder(dim=8, delay_s=0.2).embed_query("a")
+    assert calls == []
+
+
 def test_팩토리_fake_선택():
     s = Settings(ai_provider="fake")
     assert isinstance(build_structurer(s), Structurer)
     assert isinstance(build_embedder(s), Embedder)
+
+
+def test_팩토리_fake_지연설정_전달():
+    embedder = build_embedder(Settings(ai_provider="fake", fake_delay_seconds=0.5))
+    assert embedder.delay_s == 0.5
 
 
 def test_팩토리_bedrock_구현체_반환():

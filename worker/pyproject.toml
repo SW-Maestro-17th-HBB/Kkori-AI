@@ -13,11 +13,12 @@ dependencies = [
     # PDF 텍스트 추출
     "pymupdf",
     # PostgreSQL 직접 기록 + pgvector 타입
-    "psycopg[binary]",
+    "psycopg[binary,pool]",
     "pgvector",
     # 계약/설정 모델
     "pydantic",
     "pydantic-settings",
+    "uvicorn>=0.52.4",
 ]
 
 [dependency-groups]
