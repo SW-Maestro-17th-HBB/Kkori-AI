@@ -332,7 +332,7 @@ at-least-once + XAUTOCLAIM 회수는 **실제로 죽지 않은 원본과 회수�
 
 ### 11.1 엔드포인트 계약
 
-```
+```http
 POST /internal/analyses/resume
 Content-Type: application/json
 
