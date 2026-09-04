@@ -2,7 +2,7 @@ name: Worker CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [develop] # main은 Deploy 워크플로가 workflow_call로 호출 (중복 실행 방지)
     paths:
       - "worker/**"
       - "shared/**"
@@ -12,6 +12,7 @@ on:
       - "worker/**"
       - "shared/**"
       - ".github/workflows/worker-ci.yml"
+  workflow_call:
 
 jobs:
   test:
