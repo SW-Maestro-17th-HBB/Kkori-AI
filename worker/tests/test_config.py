@@ -1,0 +1,59 @@
+"""설정 로드·오버라이드 테스트."""
+
+from src.config import Settings, get_settings
+
+
+def test_기본값_로드():
+    s = Settings()
+    assert s.redis_url.startswith("redis://")
+    assert s.embedding_dim == 1024
+    assert s.delivery_count_threshold == 3
+    assert s.chunk_target_tokens == 512
+
+
+def test_환경변수_오버라이드(monkeypatch):
+    monkeypatch.setenv("KKORI_WORKER_DELIVERY_COUNT_THRESHOLD", "5")
+    monkeypatch.setenv("KKORI_WORKER_BEDROCK_REGION", "ap-northeast-2")
+    s = Settings()
+    assert s.delivery_count_threshold == 5
+    assert s.bedrock_region == "ap-northeast-2"
+
+
+def test_consumer_name_비면_hostname():
+    s = Settings()
+    assert s.resolved_consumer_name  # 비어 있지 않다
+
+
+def test_s3_endpoint_빈값은_None(monkeypatch):
+    monkeypatch.setenv("KKORI_WORKER_S3_ENDPOINT_URL", "")
+    s = Settings()
+    assert s.s3_endpoint is None
+
+
+def test_get_settings_캐시_동일_인스턴스():
+    assert get_settings() is get_settings()
+
+
+def test_stream_max_workers_가_풀_크기를_넘으면_기동_실패():
+    import pytest
+
+    with pytest.raises(ValueError, match="db_pool_max_size"):
+        Settings(stream_max_workers=11, db_pool_max_size=10)
+
+
+def test_stream_max_workers_가_풀_크기_이하면_정상():
+    s = Settings(stream_max_workers=10, db_pool_max_size=10)
+    assert s.stream_max_workers == 10
+
+
+def test_풀_크기_0은_기동_실패():
+    import pytest
+
+    # 검증 없이 넘어가면 startup 의 풀 생성(min_size=1 > max_size=0)에서 알 수 없는 에러로 죽는다
+    with pytest.raises(ValueError, match="1 이상"):
+        Settings(stream_max_workers=0, db_pool_max_size=0)
+
+
+def test_풀_크기_1은_정상():
+    s = Settings(stream_max_workers=1, db_pool_max_size=1)
+    assert s.db_pool_max_size == 1

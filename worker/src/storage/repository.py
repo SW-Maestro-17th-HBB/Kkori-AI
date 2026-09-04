@@ -1,0 +1,274 @@
+"""PostgreSQL 계층 — 스키마·상태 전이·산출물 저장 (PRD §2.4, §3, §8).
+
+소유권(§8):
+- `resume_chunks` + `CREATE EXTENSION vector` = **워커 소유** → 기동 시 멱등 DDL 로 생성.
+- `resumes`(structured_data)·`resume_analysis_status` = 백엔드 소유 → 워커는 읽고/갱신만 한다.
+
+원칙:
+- 상태 전이는 **원자적 CAS**(§3.3): `UPDATE ... WHERE parse_status = 이전상태`. 영향 행 0 = 다른
+  처리자가 앞서감 → 호출자는 재처리하지 않고 넘어간다.
+- 시각은 **UTC-aware** 로 기록(timestamptz, 백엔드 HBB1-232). naive datetime 금지.
+- 다단계 원자성(산출물 저장 + 상태 전이, §2.4)은 호출자가 `conn.transaction()` 으로 묶는다.
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import datetime, timezone
+
+from pgvector import Vector
+from pgvector.psycopg import register_vector_async
+from psycopg import AsyncConnection
+from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
+from psycopg_pool import AsyncConnectionPool
+
+from src.analysis.chunking import Chunk
+from src.config import Settings
+from src.contract import AnalysisStatus
+from src.contract.structured_data import StructuredData
+
+logger = logging.getLogger(__name__)
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+async def connect(settings: Settings) -> AsyncConnection:
+    """pgvector 어댑터가 등록된 async 커넥션을 연다 (autocommit — 원자성은 transaction() 으로)."""
+    conn = await AsyncConnection.connect(
+        settings.postgres_dsn, autocommit=True, row_factory=dict_row
+    )
+    # vector 타입이 있어야 어댑터 등록이 가능하므로 확장을 먼저 보장한다(멱등, 워커 소유 §8)
+    await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+    await register_vector_async(conn)
+    return conn
+
+
+async def _configure_pooled(conn: AsyncConnection) -> None:
+    await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+    await register_vector_async(conn)
+
+
+def create_pool(settings: Settings, max_size: int) -> AsyncConnectionPool:
+    """`connect()` 와 동일한 세션 설정(autocommit·dict_row·pgvector)의 커넥션 풀 (§11.4).
+
+    동기 HTTP 경로 전용 — 유입량과 무관하게 DB 연결을 max_size 이하로 유지한다.
+    스트림 소비 경로는 순차라 기존 `connect()` 를 그대로 쓴다.
+    호출자가 `await pool.open()` / `await pool.close()` 로 수명을 관리한다.
+    """
+    return AsyncConnectionPool(
+        settings.postgres_dsn,
+        min_size=1,
+        max_size=max_size,
+        kwargs={"autocommit": True, "row_factory": dict_row},
+        configure=_configure_pooled,
+        open=False,
+    )
+
+
+# ---------------------------------------------------------------- 스키마 (워커 소유)
+
+async def ensure_schema(conn: AsyncConnection, dim: int) -> None:
+    """워커 소유 스키마를 멱등 생성한다. 백엔드 소유 테이블은 건드리지 않는다."""
+    await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+    await conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS resume_chunks (
+            id         BIGSERIAL PRIMARY KEY,
+            resume_id  BIGINT NOT NULL,
+            content    TEXT NOT NULL,
+            metadata   JSONB NOT NULL,
+            embedding  vector({dim}) NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+        """
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS ix_resume_chunks_resume_id ON resume_chunks (resume_id)"
+    )
+    # 유사도 검색용 HNSW 인덱스 (코사인). agent 의 top-k 검색이 사용한다.
+    await conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS ix_resume_chunks_embedding
+        ON resume_chunks USING hnsw (embedding vector_cosine_ops)
+        """
+    )
+
+
+# ---------------------------------------------------------------- 상태 (원자적 CAS)
+
+async def get_parse_status(conn: AsyncConnection, resume_id: int) -> str | None:
+    """현재 파이프라인 상태. 레코드가 없으면 None (유령 이벤트 방어 — 스킵 대상)."""
+    cur = await conn.execute(
+        "SELECT parse_status FROM resume_analysis_status WHERE resume_id = %s",
+        (resume_id,),
+    )
+    row = await cur.fetchone()
+    return row["parse_status"] if row else None
+
+
+async def try_transition(
+    conn: AsyncConnection,
+    resume_id: int,
+    from_status: AnalysisStatus,
+    to_status: AnalysisStatus,
+) -> bool:
+    """원자적 상태 전이(CAS). True = 내가 전이시킴, False = 다른 처리자가 앞서감(양보).
+
+    부수 시각 기록: PARSING 진입 시 started_at, EMBEDDED 진입 시 completed_at (UTC-aware).
+    """
+    extra = ""
+    if to_status is AnalysisStatus.PARSING:
+        extra = ", started_at = %(now)s"
+    elif to_status is AnalysisStatus.EMBEDDED:
+        extra = ", completed_at = %(now)s"
+    cur = await conn.execute(
+        f"""
+        UPDATE resume_analysis_status
+        SET parse_status = %(to)s{extra}, updated_at = %(now)s
+        WHERE resume_id = %(rid)s AND parse_status = %(from)s
+        """,
+        {
+            "to": to_status.value,
+            "from": from_status.value,
+            "rid": resume_id,
+            "now": _utcnow(),
+        },
+    )
+    return cur.rowcount == 1
+
+
+async def mark_failed(conn: AsyncConnection, resume_id: int, message: str) -> bool:
+    """FAILED 종결 기록 (§4). 멱등 — 이미 FAILED/EMBEDDED(종결)면 덮어쓰지 않는다."""
+    cur = await conn.execute(
+        """
+        UPDATE resume_analysis_status
+        SET parse_status = %(failed)s, error_message = %(msg)s,
+            failed_at = %(now)s, updated_at = %(now)s
+        WHERE resume_id = %(rid)s AND parse_status NOT IN (%(failed)s, %(embedded)s)
+        """,
+        {
+            "failed": AnalysisStatus.FAILED.value,
+            "embedded": AnalysisStatus.EMBEDDED.value,
+            "msg": message,
+            "rid": resume_id,
+            "now": _utcnow(),
+        },
+    )
+    return cur.rowcount == 1
+
+
+async def record_last_error(conn: AsyncConnection, resume_id: int, summary: str) -> None:
+    """진행 중 마지막 실패 원인을 기록한다 (상태는 바꾸지 않음) — best-effort.
+
+    포기 규칙(§4)이 종결할 때 이 값을 error_message 에 합류시켜 원인 추적을 가능하게 한다.
+    기록 자체가 실패해도(예: DB 장애) 조용히 넘어간다 — 부가 기능의 실패가 원래 예외
+    전파(재시도 경로)를 가리면 안 되기 때문. 그 경우는 워커 로그가 담당한다.
+    """
+    try:
+        await conn.execute(
+            "UPDATE resume_analysis_status SET error_message = %s, updated_at = %s "
+            "WHERE resume_id = %s",
+            (summary[:500], _utcnow(), resume_id),
+        )
+    except Exception:
+        # 기록 실패가 원래 예외 전파를 가리면 안 되므로 삼키되, 흔적은 로그로 남긴다
+        logger.warning("마지막 오류 기록 실패 (resume_id=%s)", resume_id, exc_info=True)
+
+
+async def get_error_message(conn: AsyncConnection, resume_id: int) -> str | None:
+    """기록된 마지막 오류(또는 실패 사유) 조회 — 포기 규칙의 메시지 합성용."""
+    cur = await conn.execute(
+        "SELECT error_message FROM resume_analysis_status WHERE resume_id = %s",
+        (resume_id,),
+    )
+    row = await cur.fetchone()
+    return row["error_message"] if row else None
+
+
+async def reset_retry_count(conn: AsyncConnection, resume_id: int) -> None:
+    """새 런 시작 시 0 으로 리셋 (§6 — 신규 메시지에서만, 회수 재개에선 호출하지 않는다)."""
+    await conn.execute(
+        "UPDATE resume_analysis_status SET retry_count = 0, updated_at = %s WHERE resume_id = %s",
+        (_utcnow(), resume_id),
+    )
+
+
+async def increment_retry_count(conn: AsyncConnection, resume_id: int) -> None:
+    """내부 재시도마다 즉시 반영 (§6 — 크래시 생존성·관측성)."""
+    await conn.execute(
+        "UPDATE resume_analysis_status SET retry_count = retry_count + 1, updated_at = %s "
+        "WHERE resume_id = %s",
+        (_utcnow(), resume_id),
+    )
+
+
+# ---------------------------------------------------------------- 산출물
+
+async def load_structured_data(
+    conn: AsyncConnection, resume_id: int
+) -> StructuredData | None:
+    """REINDEX 입력 — 사용자 수정본이 반영된 structured_data (§2.2)."""
+    cur = await conn.execute(
+        "SELECT structured_data FROM resumes WHERE id = %s", (resume_id,)
+    )
+    row = await cur.fetchone()
+    if row is None or row["structured_data"] is None:
+        return None
+    return StructuredData.model_validate(row["structured_data"])
+
+
+async def save_structured_data(
+    conn: AsyncConnection, resume_id: int, data: StructuredData
+) -> None:
+    """LLM 구조화 결과 저장. 상태 전이(PARSED)와 같은 트랜잭션으로 묶을 것 (§2.4 불변식 1)."""
+    await conn.execute(
+        "UPDATE resumes SET structured_data = %s, updated_at = %s WHERE id = %s",
+        (Jsonb(data.model_dump()), _utcnow(), resume_id),
+    )
+
+
+async def replace_chunks(
+    conn: AsyncConnection,
+    resume_id: int,
+    chunks: list[Chunk],
+    embeddings: list[list[float]],
+    enrichments: list[dict] | None = None,
+) -> None:
+    """기존 청크 전부 삭제 후 재삽입 (§3.1 — 임베딩 진입 시 항상 선삭제, 중복·잔여 청크 방지).
+
+    enrichments 가 주어지면 청크별 metadata 에 병합한다 (§2.6 풍부화).
+    삭제·삽입의 원자성은 호출자의 `conn.transaction()` 이 보장한다.
+    """
+    if len(chunks) != len(embeddings):
+        raise ValueError(f"청크 {len(chunks)}개 ≠ 임베딩 {len(embeddings)}개")
+    if enrichments is not None and len(enrichments) != len(chunks):
+        raise ValueError(f"청크 {len(chunks)}개 ≠ 풍부화 {len(enrichments)}개")
+    await conn.execute("DELETE FROM resume_chunks WHERE resume_id = %s", (resume_id,))
+    if not chunks:
+        return  # 0청크 이력서 — 삭제만 하고 끝 (§2.5)
+
+    def metadata(i: int, chunk: Chunk) -> dict:
+        merged = chunk.metadata()
+        if enrichments is not None:
+            merged.update(enrichments[i])
+        return merged
+
+    async with conn.cursor() as cur:
+        await cur.executemany(
+            "INSERT INTO resume_chunks (resume_id, content, metadata, embedding) "
+            "VALUES (%s, %s, %s, %s)",
+            [
+                (resume_id, c.content, Jsonb(metadata(i, c)), Vector(e))
+                for i, (c, e) in enumerate(zip(chunks, embeddings))
+            ],
+        )
+
+
+async def count_chunks(conn: AsyncConnection, resume_id: int) -> int:
+    cur = await conn.execute(
+        "SELECT count(*) AS n FROM resume_chunks WHERE resume_id = %s", (resume_id,)
+    )
+    return (await cur.fetchone())["n"]

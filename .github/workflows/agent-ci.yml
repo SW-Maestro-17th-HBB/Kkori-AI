@@ -16,21 +16,49 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+
+    services:
+      # 대화 로그 write-through 테스트용 — 로컬에서 없으면 해당 테스트만 skip, CI에서는 전부 실행
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      # transcript flush 테스트용 — 로컬에서 없으면 해당 테스트만 skip, CI에서는 전부 실행
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v9.0.0
         with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: agent/requirements.txt
+          enable-cache: true
+          cache-dependency-glob: "agent/uv.lock"
 
       - name: Install dependencies
-        run: |
-          pip install -r agent/requirements.txt
-          pip install pytest
+        # 파이썬 버전은 agent/.python-version(3.13)을 uv 가 자동으로 맞춘다
+        working-directory: agent
+        run: uv sync --locked
+
+      - name: Import check
+        working-directory: agent
+        run: uv run --no-sync python -c "import src.main"
 
       - name: Run tests
-      # 테스트 추가 시 수정
-        run: |
-          pytest agent || [ $? -eq 5 ]
+        # LLM 스모크 테스트(tests/test_initial_question_llm.py)는 KKORI_LIVE_LLM 미설정이면 skip 된다 (기본)
+        working-directory: agent
+        run: uv run --no-sync pytest
