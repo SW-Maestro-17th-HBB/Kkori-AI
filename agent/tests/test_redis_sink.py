@@ -114,6 +114,21 @@ def test_write_through_preserves_schema_order_and_ttl():
     assert ttl_refreshed > 100  # append마다 TTL 갱신
 
 
+def test_aclose_swallows_redis_close_failure():
+    """연결 종료 실패가 호출자(base_cleanup·종료 시퀀스)의 후속 정리를 막지 않는다."""
+
+    class _ExplodingRedis:
+        async def aclose(self):
+            raise OSError("connection lost")
+
+    async def scenario():
+        writer = RedisTranscriptWriter(url=LOCAL_URL, session_id="x", ttl_seconds=60)
+        writer._redis = _ExplodingRedis()
+        await writer.aclose()  # 예외 없이 반환해야 한다
+
+    asyncio.run(scenario())
+
+
 @requires_redis
 def test_aclose_drains_pending_items_and_is_idempotent():
     session_id = f"test-{uuid.uuid4().hex[:8]}"
