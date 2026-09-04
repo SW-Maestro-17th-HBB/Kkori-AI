@@ -1,10 +1,9 @@
-# CD — main 브랜치 push(= develop→main 머지)로 도는 CI가 "성공"해야만 agent·worker 프로드 배포.
+# CD — main 브랜치 push(= develop→main 머지) 시, 두 CI를 재사용 워크플로로 직접 돌려
+# 각각 통과한 경우에만 해당 이미지를 빌드한다 (needs).
+# workflow_run 방식은 기본 브랜치 컨텍스트로 실행돼 OIDC sub가 develop이 되면서
+# main 전용 IAM 신뢰 조건과 충돌했다 — push 트리거 + workflow_call 호출로 sub를 main으로 유지한다.
+# main 배포에서는 CI 경로 필터가 적용되지 않는다(항상 둘 다 검증) — 원자적 배포 유지가 우선.
 # 인증은 GitHub OIDC → kkori-cd 롤 (액세스 키 없음, Kkori-Infra envs/prod/cicd.tf 참조).
-# workflow_run 트리거는 기본 브랜치(develop)에 있는 이 파일 기준으로 동작한다 — develop 머지 후부터 유효.
-#
-# CI가 경로 필터로 나뉘어 있어(Agent CI / Worker CI) 한 커밋에 둘 다 돌 수 있다 — gate 잡이
-# 같은 커밋의 두 CI 상태를 조회해 "전부 끝났고 전부 성공"일 때만, 그것도 마지막에 끝난 CI가
-# 트리거한 실행에서만 배포를 진행한다(중복 배포 방지). 한쪽만 돈 커밋이면 그 CI 성공만 본다.
 #
 # 두 이미지가 모두 push된 뒤에만 ECS를 갱신한다(deploy 잡의 needs) — 한쪽 빌드 실패로 부분 재배포되는 상황을 막기 위함.
 # 자동 롤백은 없다: ECS 서비스가 :prod 가변 태그를 참조하므로(Kkori-Infra README 배포 흐름) 서킷브레이커 롤백도 같은 이미지를 다시 당긴다.
@@ -13,9 +12,7 @@
 name: Deploy
 
 on:
-  workflow_run:
-    workflows: [Agent CI, Worker CI]
-    types: [completed]
+  push:
     branches: [main]
 
 concurrency:
@@ -28,36 +25,14 @@ env:
   ECR: 172630972882.dkr.ecr.ap-northeast-2.amazonaws.com
 
 jobs:
-  gate:
-    if: github.event.workflow_run.conclusion == 'success'
-    runs-on: ubuntu-latest
-    permissions:
-      actions: read # 같은 커밋의 다른 CI 실행 상태 조회용
-    outputs:
-      proceed: ${{ steps.check.outputs.proceed }}
-    steps:
-      - id: check
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SHA: ${{ github.event.workflow_run.head_sha }}
-        run: |
-          proceed=true
-          for wf in agent-ci.yml worker-ci.yml; do
-            run=$(gh api "repos/${{ github.repository }}/actions/workflows/$wf/runs?head_sha=$SHA&per_page=1" \
-              --jq '.workflow_runs[0] // empty | .status + "/" + (.conclusion // "")')
-            echo "$wf: ${run:-실행 없음(경로 미해당)}"
-            case "$run" in
-              "") ;;                    # 해당 경로 변경 없음 — CI 자체가 안 돎
-              completed/success) ;;
-              completed/*) echo "::error::$wf 실패 — 배포 중단"; exit 1 ;;
-              *) proceed=false ;;       # 아직 진행 중 — 그 CI 완료가 새 Deploy를 트리거하므로 이번 실행은 양보
-            esac
-          done
-          echo "proceed=$proceed" >> "$GITHUB_OUTPUT"
+  agent-ci:
+    uses: ./.github/workflows/agent-ci.yml
+
+  worker-ci:
+    uses: ./.github/workflows/worker-ci.yml
 
   build-agent:
-    needs: gate
-    if: needs.gate.outputs.proceed == 'true'
+    needs: agent-ci
     runs-on: ubuntu-latest
     permissions:
       id-token: write # OIDC AssumeRole
@@ -65,7 +40,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha }} # CI가 검증한 바로 그 커밋을 빌드
           persist-credentials: false # checkout 이후 git 작업 없음
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
@@ -83,13 +57,12 @@ jobs:
           # :prod = 서비스가 참조하는 배포 태그, :<sha> = 롤백용 불변 태그 (ECR 라이프사이클: 최근 10개 보관)
           tags: |
             ${{ env.ECR }}/kkori/agent:prod
-            ${{ env.ECR }}/kkori/agent:${{ github.event.workflow_run.head_sha }}
+            ${{ env.ECR }}/kkori/agent:${{ github.sha }}
           cache-from: type=gha,scope=agent
           cache-to: type=gha,mode=max,scope=agent
 
   build-worker:
-    needs: gate
-    if: needs.gate.outputs.proceed == 'true'
+    needs: worker-ci
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -97,7 +70,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
           persist-credentials: false
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
@@ -114,7 +86,7 @@ jobs:
           push: true
           tags: |
             ${{ env.ECR }}/kkori/worker:prod
-            ${{ env.ECR }}/kkori/worker:${{ github.event.workflow_run.head_sha }}
+            ${{ env.ECR }}/kkori/worker:${{ github.sha }}
           cache-from: type=gha,scope=worker
           cache-to: type=gha,mode=max,scope=worker
 

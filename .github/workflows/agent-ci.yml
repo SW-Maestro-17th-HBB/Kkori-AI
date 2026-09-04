@@ -2,7 +2,7 @@ name: Agent CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [develop] # main은 Deploy 워크플로가 workflow_call로 호출 (중복 실행 방지)
     paths:
       - "agent/**"
       - "shared/**"
@@ -12,6 +12,7 @@ on:
       - "agent/**"
       - "shared/**"
       - ".github/workflows/agent-ci.yml"
+  workflow_call:
 
 jobs:
   test:
