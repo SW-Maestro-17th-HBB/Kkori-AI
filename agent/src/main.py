@@ -278,7 +278,8 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         if writer is not None:
             await writer.aclose()
         if session_id:
-            await flush_metrics(session_id, metrics_log.rows)
+            # batch_id=잡 ID — 재시도 간 불변이라 flush 재시도의 배치 멱등 키가 된다
+            await flush_metrics(session_id, metrics_log.rows, batch_id=ctx.job.id)
             await release_owner(session_id, ctx.job.id)
 
     ctx.add_shutdown_callback(base_cleanup)

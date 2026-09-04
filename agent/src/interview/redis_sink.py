@@ -79,7 +79,10 @@ class RedisTranscriptWriter:
             self._task.cancel()
             with suppress(asyncio.CancelledError):
                 await self._task
-        await self._redis.aclose()
+        # 연결 종료 실패도 삼킨다 — aclose가 예외를 흘리면 호출자(base_cleanup·
+        # 종료 시퀀스)의 후속 정리가 중단된다
+        with suppress(Exception):
+            await self._redis.aclose()
 
     async def _drain_loop(self) -> None:
         while True:

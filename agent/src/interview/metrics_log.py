@@ -33,9 +33,11 @@ _STATEMENT_TIMEOUT_MS = 4000
 # VAD처럼 고빈도 발행원이 있어도 장시간 면접이 메모리를 잠식하지 않게 하는 상한
 _MAX_ROWS = 10_000
 
+# 배치 키(batch_id+ordinal) 충돌 무시 — commit 후 응답 유실 재시도가 전량 중복을
+# 만들지 않는다(재시도 계약의 멱등성 근거, 002 마이그레이션 참조)
 _INSERT_SQL = (
-    "INSERT INTO interview_metrics (session_id, ts, kind, payload) "
-    "VALUES (%s, %s, %s, %s)"
+    "INSERT INTO interview_metrics (session_id, batch_id, ordinal, ts, kind, payload) "
+    "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (batch_id, ordinal) DO NOTHING"
 )
 
 # 축적 행: (이벤트 시각, 종별 판별자, 원본 payload)
@@ -87,8 +89,13 @@ class MetricsLog:
         self._rows.append((ts, kind, payload))
 
 
-async def flush_metrics(session_id: str, rows: Sequence[MetricsRow]) -> bool:
-    """수집된 메트릭을 일괄 INSERT한다. True = flush 완료(빈 rows no-op 포함)."""
+async def flush_metrics(
+    session_id: str, rows: Sequence[MetricsRow], *, batch_id: str
+) -> bool:
+    """수집된 메트릭을 일괄 INSERT한다. True = flush 완료(빈 rows no-op 포함).
+
+    batch_id는 잡 ID — 재시도 간 불변이어야 배치 키 멱등성이 성립한다.
+    """
     if not rows:
         return True
     url = os.getenv(DATABASE_URL_ENV)
@@ -103,7 +110,8 @@ async def flush_metrics(session_id: str, rows: Sequence[MetricsRow]) -> bool:
         return False
 
     params = [
-        (numeric_session_id, ts, kind, Jsonb(payload)) for ts, kind, payload in rows
+        (numeric_session_id, batch_id, ordinal, ts, kind, Jsonb(payload))
+        for ordinal, (ts, kind, payload) in enumerate(rows)
     ]
     for attempt in range(1, _FLUSH_ATTEMPTS + 1):
         try:

@@ -137,11 +137,15 @@ def migrated_db(monkeypatch):
 @requires_pg
 def test_flush_writes_one_row_per_event(migrated_db):
     session_id = random.randint(10**9, 10**10)
+    batch_id = f"AJ_test_{session_id}"
     log = MetricsLog()
     log.handler("orchestrator")(_llm_metrics())
     log.handler()(_eou_event(EPOCH + 1))
     try:
-        assert asyncio.run(flush_metrics(str(session_id), log.rows)) is True
+        assert (
+            asyncio.run(flush_metrics(str(session_id), log.rows, batch_id=batch_id))
+            is True
+        )
         rows = _fetch_rows(session_id)
         assert [kind for kind, _ in rows] == ["llm_metrics", "eou_metrics"]
         assert rows[0][1]["source"] == "orchestrator"
@@ -150,23 +154,46 @@ def test_flush_writes_one_row_per_event(migrated_db):
         _cleanup(session_id)
 
 
+@requires_pg
+def test_duplicate_batch_flush_does_not_duplicate_rows(migrated_db):
+    """commit 후 응답 유실 재시도 모사 — 같은 배치의 재flush는 행을 늘리지 않는다."""
+    session_id = random.randint(10**9, 10**10)
+    batch_id = f"AJ_test_{session_id}"
+    log = MetricsLog()
+    log.handler("orchestrator")(_llm_metrics())
+    log.handler()(_eou_event(EPOCH + 1))
+    try:
+        assert (
+            asyncio.run(flush_metrics(str(session_id), log.rows, batch_id=batch_id))
+            is True
+        )
+        # 1차 commit이 성공했지만 응답이 유실된 상황 — 같은 batch_id로 전량 재실행
+        assert (
+            asyncio.run(flush_metrics(str(session_id), log.rows, batch_id=batch_id))
+            is True
+        )
+        assert len(_fetch_rows(session_id)) == 2  # 중복 없음 (배치 키 멱등)
+    finally:
+        _cleanup(session_id)
+
+
 def test_flush_empty_rows_is_noop_success(monkeypatch):
     monkeypatch.delenv(DATABASE_URL_ENV, raising=False)
-    assert asyncio.run(flush_metrics("123", [])) is True
+    assert asyncio.run(flush_metrics("123", [], batch_id="AJ_test1")) is True
 
 
 def test_flush_skipped_without_database_config(monkeypatch):
     monkeypatch.delenv(DATABASE_URL_ENV, raising=False)
     log = MetricsLog()
     log.record(_llm_metrics())
-    assert asyncio.run(flush_metrics("123", log.rows)) is False
+    assert asyncio.run(flush_metrics("123", log.rows, batch_id="AJ_test1")) is False
 
 
 def test_flush_rejects_non_numeric_session_id(monkeypatch):
     monkeypatch.setenv(DATABASE_URL_ENV, LOCAL_URL)
     log = MetricsLog()
     log.record(_llm_metrics())
-    assert asyncio.run(flush_metrics("console-test", log.rows)) is False
+    assert asyncio.run(flush_metrics("console-test", log.rows, batch_id="AJ_test1")) is False
 
 
 # --- 재시도 계약 (실패 시 1회 재시도 — transcript_store와 동일) ---
@@ -215,7 +242,7 @@ def test_flush_retries_once_then_succeeds(monkeypatch):
     calls = _fake_connect(monkeypatch, fail_first=True)
     log = MetricsLog()
     log.record(_llm_metrics())
-    assert asyncio.run(flush_metrics("123", log.rows)) is True
+    assert asyncio.run(flush_metrics("123", log.rows, batch_id="AJ_test1")) is True
     assert calls["n"] == 2
 
 
@@ -223,5 +250,5 @@ def test_flush_gives_up_after_retry_exhaustion(monkeypatch):
     calls = _fake_connect(monkeypatch, fail_all=True)
     log = MetricsLog()
     log.record(_llm_metrics())
-    assert asyncio.run(flush_metrics("123", log.rows)) is False
+    assert asyncio.run(flush_metrics("123", log.rows, batch_id="AJ_test1")) is False
     assert calls["n"] == 2
