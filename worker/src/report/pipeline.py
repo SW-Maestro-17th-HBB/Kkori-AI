@@ -160,7 +160,7 @@ async def process_generation_request(
     evaluated = await _evaluate_all(
         pairs, conn=conn, report_id=report_id, evaluator=evaluator, settings=settings
     )
-    summary = await _with_retry(
+    summary = await with_retry(
         lambda: asyncio.to_thread(evaluator.summarize, evaluated),
         conn=conn, report_id=report_id, settings=settings,
     )
@@ -208,7 +208,7 @@ async def _give_up(
         await publish(report["id"], report["user_id"], ReportStatus.FAILED, simple)
 
 
-async def _with_retry(
+async def with_retry(
     thunk: Callable[[], Awaitable[T]],
     *,
     conn: AsyncConnection,
@@ -247,7 +247,7 @@ async def _evaluate_all(
     """주제별 순차 평가 — LLM 호출은 blocking 이라 스레드로 넘긴다 (동시화는 실측 후)."""
     evaluated: list[EvaluatedAnswer] = []
     for topic in group_topics(pairs):
-        results = await _with_retry(
+        results = await with_retry(
             lambda t=topic: asyncio.to_thread(evaluator.evaluate_topic, t),
             conn=conn, report_id=report_id, settings=settings,
         )

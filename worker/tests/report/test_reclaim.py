@@ -16,11 +16,18 @@ import pytest_asyncio
 import redis.asyncio as aioredis
 
 import src.report.main as report_main
-from src.contract import ReportGenerationRequested, ReportStatus, ReportStatusChanged
+from src.contract import (
+    AudioAnalysisRequested,
+    ReportGenerationRequested,
+    ReportStatus,
+    ReportStatusChanged,
+)
 from src.report.evaluator import FakeEvaluator
 from src.report.streams import publish_status
 from tests.conftest import requires_postgres, seed_session, seed_transcript
-from tests.report.test_pipeline import UTTERANCES
+from tests.report.test_audio_pipeline import FakeS3
+from tests.report.test_audio_pipeline import UTTERANCES as AUDIO_UTTERANCES
+from tests.report.test_pipeline import UTTERANCES, run as run_generation
 
 
 def _redis_available() -> bool:
@@ -67,6 +74,14 @@ def wired(conn, monkeypatch):
     monkeypatch.setattr(report_main._Resources, "db", conn)
     monkeypatch.setattr(report_main._Resources, "evaluator", FakeEvaluator())
     monkeypatch.setattr(report_main.settings, "retry_base_delay_s", 0.0)
+
+
+async def seed_audio_ready(conn) -> int:
+    """텍스트 분석이 끝나 음성을 기다리는 세션 (대본은 픽스처 녹음과 짝)."""
+    session_id, _ = await seed_session(conn)
+    await seed_transcript(conn, session_id, AUDIO_UTTERANCES)
+    await run_generation(conn, session_id, audio_enabled=True)
+    return session_id
 
 
 async def dead_worker_takes(redis, fields: dict) -> None:
@@ -187,11 +202,11 @@ async def _run_subscriber(sub, seconds: float) -> None:
             await report_main.broker.stop()
 
 
-def _subscribers():
-    subs = report_main.broker._subscribers
+def _subscribers(stream: str = STREAM):
+    subs = [s for s in report_main.broker._subscribers if s.stream_sub.name == stream]
     reclaim = [s for s in subs if s.stream_sub.min_idle_time is not None]
     fresh = [s for s in subs if s.stream_sub.min_idle_time is None]
-    assert len(reclaim) == 1 and len(fresh) == 1, "구독자는 회수용·새 메시지용 하나씩이어야 한다"
+    assert len(reclaim) == 1 and len(fresh) == 1, "스트림마다 구독자는 회수용·새 메시지용 하나씩이어야 한다"
     return reclaim[0], fresh[0]
 
 
@@ -265,3 +280,76 @@ async def test_구독자_배선_처리실패시_ACK안하고_PEL에_남는다(co
 
     assert called.is_set(), "회수 구독자가 메시지를 처리 함수까지 전달해야 한다"
     assert (await redis.xpending(STREAM, GROUP))["pending"] == 1, "처리 실패 메시지가 ACK 되면 안 된다"
+
+
+# --- 음성 분석 요청 스트림 ---------------------------------------------------
+# 회수 규칙은 생성 요청과 같은 `_reclaim` 을 타므로, 음성 쪽은 배선(스트림 키·계약·처리 함수)만 확인한다.
+
+AUDIO_STREAM = AudioAnalysisRequested.STREAM_KEY
+
+
+@pytest_asyncio.fixture
+async def audio_redis(redis):
+    try:
+        await redis.xgroup_destroy(AUDIO_STREAM, GROUP)
+    except Exception:
+        pass
+    await redis.delete(AUDIO_STREAM)
+    await redis.xgroup_create(AUDIO_STREAM, GROUP, id="0", mkstream=True)
+    yield redis
+    try:
+        await redis.xgroup_destroy(AUDIO_STREAM, GROUP)
+    except Exception:
+        pass
+    await redis.delete(AUDIO_STREAM)
+
+
+async def _reclaim_all_audio(redis, limit: int = 10) -> int:
+    processed = 0
+    for _ in range(limit):
+        _cursor, messages, _deleted = await redis.xautoclaim(
+            name=AUDIO_STREAM, groupname=GROUP,
+            consumername=report_main.settings.reclaim_consumer_name, min_idle_time=0, count=1,
+        )
+        if not messages:
+            break
+        message_id, fields = messages[0]
+        await report_main.reclaim_audio_one(redis, message_id, fields)
+        processed += 1
+    return processed
+
+
+@pytest.mark.asyncio
+async def test_음성_요청_방치_메시지를_회수해_재처리하고_ACK한다(conn, audio_redis, wired, monkeypatch):
+    monkeypatch.setattr(report_main._Resources, "s3", FakeS3())
+    session_id = await seed_audio_ready(conn)
+    await audio_redis.xadd(AUDIO_STREAM, AudioAnalysisRequested(
+        sessionId=session_id, bucket="b", objectKey="recordings/x.ogg").encode())
+    await audio_redis.xreadgroup(GROUP, "dead-worker", {AUDIO_STREAM: ">"}, count=10)
+
+    assert await _reclaim_all_audio(audio_redis) == 1
+
+    cur = await conn.execute(
+        "SELECT status, audio_analyzed_at FROM reports WHERE interview_session_id = %s", (session_id,)
+    )
+    row = await cur.fetchone()
+    assert row["audio_analyzed_at"] is not None
+    assert row["status"] == ReportStatus.COMPLETED.value  # 텍스트는 이미 끝나 있었다
+    assert (await audio_redis.xpending(AUDIO_STREAM, GROUP))["pending"] == 0  # XACK 됨
+
+
+@pytest.mark.asyncio
+async def test_음성_요청_형식_위반_메시지는_제거된다(conn, audio_redis, wired):
+    await audio_redis.xadd(AUDIO_STREAM, {"sessionId": "1"})  # bucket·objectKey 없음
+    await audio_redis.xreadgroup(GROUP, "dead-worker", {AUDIO_STREAM: ">"}, count=10)
+
+    await _reclaim_all_audio(audio_redis)
+
+    assert (await audio_redis.xpending(AUDIO_STREAM, GROUP))["pending"] == 0
+
+
+@pytest.mark.asyncio
+async def test_음성_구독자_배선은_스트림마다_회수용과_새메시지용이_있다():
+    reclaim_sub, fresh_sub = _subscribers(AUDIO_STREAM)
+    assert reclaim_sub.stream_sub.min_idle_time == report_main.settings.claim_min_idle_ms
+    assert fresh_sub.stream_sub.group == report_main.settings.report_consumer_group
