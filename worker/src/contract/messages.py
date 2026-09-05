@@ -1,7 +1,8 @@
-"""Spring 백엔드 ↔ 워커 사이 Redis Stream 메시지 계약.
+"""Spring 백엔드 ↔ 워커 사이 Redis 메시지 계약 (요청은 Stream, 상태는 Pub/Sub).
 
 이 파일은 백엔드 계약 record의 자기완결 사본이다(변경 권한은 백엔드에 있음).
-Redis Stream 필드는 전부 문자열이므로, 아래 모델이 문자열 필드맵 ↔ 파이썬 모델 변환을 책임진다.
+값은 전부 문자열이다 — 요청은 Redis Stream 필드로 오고, 상태는 같은 문자열맵을 JSON 으로
+Pub/Sub 채널에 발행한다. 아래 모델이 문자열 필드맵 ↔ 파이썬 모델 변환을 책임진다.
 필드명은 전송 계약의 키와 1:1로 맞추기 위해 camelCase 를 그대로 쓴다(파이썬 관례보다 계약 일치를 우선).
 
 계약 상세: worker/docs/requirements/resume-analysis/pipeline.md §1
@@ -63,9 +64,14 @@ class ParseRequest(BaseModel):
 
 
 class StatusChanged(BaseModel):
-    """`resume.parse.status.changed` — 워커가 단계마다 발행하는 상태 (§1.2)."""
+    """`resume.parse.status.changed` — 워커가 단계마다 발행하는 상태 (§1.2).
 
-    STREAM_KEY: ClassVar[str] = "resume.parse.status.changed"
+    Pub/Sub 채널에 JSON 으로 발행하고, Spring 전 인스턴스가 구독한다(SSE 중계).
+    스트림이 아닌 이유: Consumer Group 으로 읽으면 메시지가 인스턴스에 나뉘어
+    SSE 연결이 없는 쪽이 받은 몫은 버려지기 때문 (HBB1-332).
+    """
+
+    CHANNEL: ClassVar[str] = "resume.parse.status.changed"
 
     resumeId: int
     userId: int
@@ -75,11 +81,11 @@ class StatusChanged(BaseModel):
 
     @classmethod
     def decode(cls, fields: Mapping[str, str]) -> "StatusChanged":
-        """Redis 문자열 필드맵 → 모델 (주로 테스트·검증용). 없는 message 는 "" 로 취급."""
+        """문자열 필드맵(JSON 페이로드) → 모델 (주로 테스트·검증용). 없는 message 는 "" 로 취급."""
         return cls.model_validate(dict(fields))
 
     def encode(self) -> dict[str, str]:
-        """모델 → Redis 문자열 필드맵. message 는 null/빈값 → "" 규칙을 적용."""
+        """모델 → 문자열 필드맵(JSON 으로 직렬화해 발행). message 는 null/빈값 → "" 규칙을 적용."""
         return {
             "resumeId": str(self.resumeId),
             "userId": str(self.userId),

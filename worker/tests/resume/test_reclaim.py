@@ -9,6 +9,7 @@
 
 import asyncio
 import contextlib
+import json
 
 import pytest
 import pytest_asyncio
@@ -16,7 +17,7 @@ import redis.asyncio as aioredis
 
 import src.main as main
 from src.ai import FakeEmbedder, FakeEnricher, FakeStructurer
-from src.contract import AnalysisStatus, ParseRequest
+from src.contract import AnalysisStatus, ParseRequest, StatusChanged
 from src.storage.repository import count_chunks, get_parse_status
 from src.contract.structured_data import StructuredData
 from tests.conftest import DIM, requires_postgres, seed_resume
@@ -50,15 +51,34 @@ async def redis():
         await r.xgroup_destroy(STREAM, GROUP)
     except Exception:
         pass
-    await r.delete(STREAM, "resume.parse.status.changed")
+    await r.delete(STREAM)
     await r.xgroup_create(STREAM, GROUP, id="0", mkstream=True)
     yield r
     try:
         await r.xgroup_destroy(STREAM, GROUP)
     except Exception:
         pass
-    await r.delete(STREAM, "resume.parse.status.changed")
+    await r.delete(STREAM)
     await r.aclose()
+
+
+@pytest_asyncio.fixture
+async def status_channel(redis):
+    """상태 Pub/Sub 채널 구독자. 저장이 없으므로 발행 전에 구독해 둬야 받는다."""
+    pubsub = redis.pubsub()
+    await pubsub.subscribe(StatusChanged.CHANNEL)
+    assert (await pubsub.get_message(timeout=2.0))["type"] == "subscribe"  # 구독 확정 후 진행
+    yield pubsub
+    await pubsub.unsubscribe(StatusChanged.CHANNEL)
+    await pubsub.aclose()
+
+
+async def _received_statuses(pubsub) -> list[str]:
+    """구독자가 받은 상태 이벤트의 status 값을 순서대로 모은다."""
+    statuses = []
+    while msg := await pubsub.get_message(ignore_subscribe_messages=True, timeout=0.5):
+        statuses.append(json.loads(msg["data"])["status"])
+    return statuses
 
 
 @pytest.fixture
@@ -125,7 +145,7 @@ async def test_방치메시지_회수해_재처리하고_ACK(conn, redis, wired)
 
 
 @pytest.mark.asyncio
-async def test_회수본도_포기규칙_임계도달시_FAILED_후_ACK(conn, redis, wired):
+async def test_회수본도_포기규칙_임계도달시_FAILED_후_ACK(conn, redis, wired, status_channel):
     """독성 메시지 무한 회수 차단 — 회수 경로에서 delivery count 임계 도달 → FAILED + ACK."""
     rid = await seed_resume(conn, AnalysisStatus.EMBEDDING, SD)
     mid = await _simulate_dead_worker(redis, rid)  # 1번째 전달
@@ -139,11 +159,8 @@ async def test_회수본도_포기규칙_임계도달시_FAILED_후_ACK(conn, re
     assert await count_chunks(conn, rid) == 0  # 재처리(청킹·임베딩) 안 함
     assert await _pending_count(redis) == 0  # 포기 후에도 ACK — PEL 에서 제거
 
-    # 발행된 마지막 이벤트가 FAILED 인지
-    entries = await redis.xrange("resume.parse.status.changed")
-    statuses = [
-        {k.decode(): v.decode() for k, v in fields.items()}["status"] for _, fields in entries
-    ]
+    # 발행된 마지막 이벤트가 FAILED 인지 (Pub/Sub 구독자가 받은 순서 기준)
+    statuses = await _received_statuses(status_channel)
     assert statuses[-1] == "FAILED"
 
 

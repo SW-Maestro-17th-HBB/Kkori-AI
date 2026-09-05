@@ -41,7 +41,7 @@ def _request(rid: int, mode: AnalysisMode = AnalysisMode.REINDEX) -> ParseReques
 
 
 def _statuses(fake_redis: _FakeRedis) -> list[str]:
-    return [fields["status"] for _, fields in fake_redis.entries]
+    return [json.loads(message)["status"] for _, message in fake_redis.published]
 
 
 def _body(resp) -> dict:
@@ -85,7 +85,7 @@ async def test_유령_resumeId_는_404(conn, wired):
     resp = await main.analyze_sync(_request(999_999), fake)
 
     assert resp.status_code == 404
-    assert fake.entries == []  # 유령은 이벤트도 없다
+    assert fake.published == []  # 유령은 이벤트도 없다
 
 
 @pytest.mark.asyncio
@@ -107,7 +107,7 @@ async def test_이미_EMBEDDED_면_스킵하고_200(conn, wired):
     resp = await main.analyze_sync(_request(rid), fake)
 
     assert resp.status_code == 200  # 멱등 — 중복 호출도 성공 (§2.4)
-    assert fake.entries == []  # 스킵이라 재발행 없음
+    assert fake.published == []  # 스킵이라 재발행 없음
 
 
 @pytest.mark.asyncio

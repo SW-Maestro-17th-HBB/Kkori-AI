@@ -1,7 +1,8 @@
 """리포트 계약 예시 대조 테스트 — 이력서 계약(test_contract.py)과 같은 방식.
 
-실제 스트림 필드맵 예시(examples/*.json)를 고정해두고, 계약 모델이 그 예시를
-정확히 읽고(decode) / 만드는지(encode) 양방향으로 대조한다. 계약이 바뀌면
+실제 필드맵 예시(examples/*.json)를 고정해두고, 계약 모델이 그 예시를
+정확히 읽고(decode) / 만드는지(encode) 양방향으로 대조한다. 요청은 스트림 필드로,
+상태(report_status_changed)는 같은 필드맵을 JSON 으로 Pub/Sub 발행한다. 계약이 바뀌면
 예시 파일도 함께 바뀌어야 하고, 그 변경이 PR diff에 그대로 드러난다.
 """
 
@@ -64,6 +65,14 @@ def test_상태메시지_status는_발행_대상_3상태만_허용한다():
         ReportStatusChanged.decode({**fields, "status": "EVALUATING"})  # 계약 밖 상태
     with pytest.raises(ValidationError):
         ReportStatusChanged.decode({**fields, "status": "PENDING"})  # 내부 상태 — 발행 금지
+
+
+def test_상태메시지_JSON_페이로드는_encode와_키값이_같다():
+    """Pub/Sub 으로 나가는 JSON 을 되읽으면 encode() 결과와 똑같아야 한다 (값 전부 문자열)."""
+    fields = _load("report_status_changed.json")
+    encoded = ReportStatusChanged.decode(fields).encode()
+    assert json.loads(json.dumps(encoded, ensure_ascii=False)) == fields
+    assert all(isinstance(v, str) for v in encoded.values())
 
 
 def test_상태메시지_message_없으면_빈문자열로_encode된다():
