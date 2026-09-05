@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     # "확정 전까지 Worker는 텍스트 3축으로만 동작하고 delivery_score는 null").
     # 음성 분석 소비자가 배포될 때 True 로 켜면 "텍스트·음성 둘 다 완료" 판정으로 바뀐다.
     audio_analysis_enabled: bool = False
+    # 유예 완성 — 텍스트 분석 완료 후 이 시간 안에 음성 분석이 끝나지 않으면 전달력 없이
+    # 완성한다(백엔드 PRD §1). 값은 잠정(녹음 업로드 소요 실측 후 확정 — PRD "미정").
+    # audio_analysis_enabled 가 켜져 있을 때만 돈다(꺼져 있으면 텍스트만으로 즉시 완성).
+    audio_grace_seconds: float = 600.0
+    audio_grace_poll_interval_s: float = 60.0
 
     # --- AI 제공자 선택 (§8) ---
     # "fake" = 가짜(로컬/테스트, 클라우드 없이) / "bedrock" = 실제(클라우드 준비 후)
