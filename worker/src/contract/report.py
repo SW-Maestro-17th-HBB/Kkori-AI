@@ -1,4 +1,4 @@
-"""리포트 파이프라인의 Redis Stream 메시지·jsonb 계약.
+"""리포트 파이프라인의 Redis 메시지(요청 Stream·상태 Pub/Sub)·jsonb 계약.
 
 이 파일은 백엔드 계약의 자기완결 사본이다(변경 권한은 백엔드에 있음 —
 `Kkori-Backend` docs/requirements/report/report.md §1 인터페이스 요구사항).
@@ -118,12 +118,15 @@ class RegenerateRequested(BaseModel):
 class ReportStatusChanged(BaseModel):
     """`report.status.changed` — 워커가 상태 전이마다 발행, Spring이 소비(SSE 중계).
 
+    Pub/Sub 채널에 JSON 으로 발행하고, Spring 전 인스턴스가 구독한다. 스트림이 아닌 이유는
+    이력서 StatusChanged 와 같다 (HBB1-332).
+
     PENDING 은 발행하지 않는다(로우 생성 직후의 짧은 초기 상태 — 백엔드 PRD §5).
     이 규칙은 모델 검증이 강제한다 — 이벤트에 실리는 상태는 PROCESSING·COMPLETED·FAILED
     세 가지뿐이라는 것이 Spring·프론트 소비 구현의 전제다.
     """
 
-    STREAM_KEY: ClassVar[str] = "report.status.changed"
+    CHANNEL: ClassVar[str] = "report.status.changed"
 
     reportId: int
     userId: int

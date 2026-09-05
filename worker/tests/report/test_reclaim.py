@@ -2,7 +2,7 @@
 
 시나리오: 다른 소비자("죽은 워커")가 메시지를 가져간 뒤 ACK 없이 사라짐
 → 회수 구독자가 XAUTOCLAIM 으로 가져와 재처리·XACK 하는지, 형식 위반 메시지를 제거하는지,
-상태 발행이 Spring 이 읽는 네이티브 필드로 나가는지 검증.
+상태 발행이 Spring 이 구독하는 Pub/Sub 채널에 JSON 으로 나가는지 검증.
 
 회수 구독자의 배관(폴링·커서)은 FastStream 몫이라, 테스트는 실제 XAUTOCLAIM 결과를
 `report.main.reclaim_one` 에 그대로 넘겨 처리 규칙만 확인한다.
@@ -10,6 +10,7 @@
 
 import asyncio
 import contextlib
+import json
 
 import pytest
 import pytest_asyncio
@@ -39,7 +40,7 @@ pytestmark = [
 ]
 
 STREAM = ReportGenerationRequested.STREAM_KEY
-STATUS_STREAM = ReportStatusChanged.STREAM_KEY
+STATUS_CHANNEL = ReportStatusChanged.CHANNEL
 GROUP = "kkori-report-worker"
 
 
@@ -50,14 +51,14 @@ async def redis():
         await r.xgroup_destroy(STREAM, GROUP)
     except Exception:
         pass
-    await r.delete(STREAM, STATUS_STREAM)
+    await r.delete(STREAM)
     await r.xgroup_create(STREAM, GROUP, id="0", mkstream=True)
     yield r
     try:
         await r.xgroup_destroy(STREAM, GROUP)
     except Exception:
         pass
-    await r.delete(STREAM, STATUS_STREAM)
+    await r.delete(STREAM)
     await r.aclose()
 
 
@@ -147,18 +148,25 @@ async def test_재처리_실패_메시지는_PEL에_남는다(conn, redis, wired
 
 
 @pytest.mark.asyncio
-async def test_상태_발행은_네이티브_필드로_나간다(redis):
-    await publish_status(redis, 7, 3, ReportStatus.PROCESSING)
+async def test_상태_발행은_PubSub_채널에_JSON으로_나간다(redis):
+    pubsub = redis.pubsub()
+    await pubsub.subscribe(STATUS_CHANNEL)  # 저장이 없으므로 발행 전에 구독
+    assert (await pubsub.get_message(timeout=2.0))["type"] == "subscribe"  # 구독 확정 후 발행
+    try:
+        await publish_status(redis, 7, 3, ReportStatus.PROCESSING)
 
-    entries = await redis.xrange(STATUS_STREAM)
-    assert len(entries) == 1
-    _id, fields = entries[0]
-    decoded = {k.decode(): v.decode() for k, v in fields.items()}
-    assert decoded == {
-        "reportId": "7", "userId": "3", "status": "PROCESSING", "message": "",
-    }
-    # 계약 왕복 — Spring 쪽 파싱과 같은 형태로 읽힌다
-    assert ReportStatusChanged.decode(decoded).status is ReportStatus.PROCESSING
+        msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=2.0)
+        assert msg is not None
+        assert msg["channel"].decode() == STATUS_CHANNEL
+        decoded = json.loads(msg["data"])
+        assert decoded == {
+            "reportId": "7", "userId": "3", "status": "PROCESSING", "message": "",
+        }
+        # 계약 왕복 — Spring 쪽 파싱과 같은 형태로 읽힌다
+        assert ReportStatusChanged.decode(decoded).status is ReportStatus.PROCESSING
+    finally:
+        await pubsub.unsubscribe(STATUS_CHANNEL)
+        await pubsub.aclose()
 
 
 # --- 구독 배관 통합 검증 ---------------------------------------------------

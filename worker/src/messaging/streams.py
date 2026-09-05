@@ -1,14 +1,19 @@
-"""이력서 상태 발행 — 네이티브 필드 형식.
+"""이력서 상태 발행 — Pub/Sub 채널에 JSON 으로 PUBLISH.
 
-## Redis Stream 상호운용 (실 Redis 로 확인, 2026-07-17)
-- Spring 은 각 필드를 **네이티브 스트림 필드**로 XADD 한다(`mapBacked`).
-- FastStream 기본 발행은 `__data__` 바이너리 봉투로 감싸 Spring 이 못 읽는다
-  → 상태 발행은 redis 커넥션으로 네이티브 필드를 직접 XADD 한다.
+## 왜 스트림이 아니라 Pub/Sub 인가 (HBB1-332)
+- Spring 이 상태 스트림을 Consumer Group 하나로 읽으면 메시지가 인스턴스별로 나뉘고,
+  SSE 연결이 없는 인스턴스가 받은 몫은 버려져 알림이 유실됐다.
+- Pub/Sub 은 구독 중인 Spring 전 인스턴스에 같은 메시지가 가므로 SSE 연결이 있는 쪽이 받는다.
+- 페이로드는 `StatusChanged.encode()` 의 문자열맵을 그대로 JSON 으로 직렬화한다(값 전부 문자열).
+- FastStream 기본 발행은 `__data__` 봉투로 감싸므로 쓰지 않고, redis 커넥션으로 직접 PUBLISH 한다.
 
+요청 스트림(`resume.parse.requested`) 소비는 그대로 Stream + Consumer Group 이다.
 전달 횟수 조회는 도메인 공통이라 `messaging.pel` 로 옮겼다.
 """
 
 from __future__ import annotations
+
+import json
 
 from redis.asyncio import Redis
 
@@ -25,8 +30,8 @@ async def publish_status(
     status: AnalysisStatus,
     message: str = "",
 ) -> None:
-    """상태 이벤트를 Spring 이 읽는 네이티브 필드 형식으로 발행한다."""
+    """상태 이벤트를 Pub/Sub 채널에 JSON 으로 발행한다 (Spring 전 인스턴스가 구독)."""
     payload = StatusChanged(
         resumeId=resume_id, userId=user_id, status=status, message=message
     ).encode()
-    await redis.xadd(StatusChanged.STREAM_KEY, payload)
+    await redis.publish(StatusChanged.CHANNEL, json.dumps(payload, ensure_ascii=False))
