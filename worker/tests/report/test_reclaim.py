@@ -19,7 +19,7 @@ import redis.asyncio as aioredis
 import src.report.main as report_main
 from src.contract import ReportGenerationRequested, ReportStatus, ReportStatusChanged
 from src.report.evaluator import FakeEvaluator
-from src.report.streams import publish_status
+from src.report.publish import publish_status
 from tests.conftest import requires_postgres, seed_session, seed_transcript
 from tests.report.test_pipeline import UTTERANCES
 
