@@ -1,7 +1,7 @@
 """FastStream 워커 진입점 (§2, §3) — 자원·구독의 조립(배선)만 담당한다.
 
 `resume.parse.requested` 를 consumer group 으로 소비해 분석 파이프라인
-(`analysis.pipeline`)을 태우고, 단계마다 상태를 발행한다(`messaging.streams`).
+(`analysis.pipeline`)을 태우고, 단계마다 상태를 발행한다(`messaging.publish`).
 
 구독자는 둘이다 — 새 메시지용과 방치 메시지 회수용. `StreamSub` 에 `min_idle_time` 을
 주면 XREADGROUP 대신 XAUTOCLAIM 을 도는 회수 전용 모드가 되어 갓 들어온 메시지를 못
@@ -36,7 +36,7 @@ from src.config import Settings, get_settings
 from src.contract import AnalysisStatus, ParseRequest
 from src.contract.fields import decode_fields
 from src.messaging.pel import get_delivery_count
-from src.messaging.streams import publish_status
+from src.messaging.publish import publish_status
 from src.storage.repository import (
     connect,
     create_pool,

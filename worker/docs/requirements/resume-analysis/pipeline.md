@@ -11,18 +11,20 @@
 Worker는 Spring 백엔드가 발행한 이력서 분석 요청을 Redis Stream에서 소비하여, PDF를 구조화
 데이터·검색 색인으로 변환하는 비동기 처리기다. Spring은 업로드 검증·저장·상태 조회·SSE 중계를
 담당하고, 실제 분석(텍스트 추출 → LLM 구조화 → 청킹 → 임베딩 → pgvector 색인)은 Worker가 수행한다.
+상태 알림은 Redis Pub/Sub 채널로 발행해 Spring 인스턴스 전부가 받는다.
 
 ```
 [Spring] --XADD--> (resume.parse.requested) --XREADGROUP--> [Worker]
                                                               │  S3/MinIO 다운로드
                                                               │  AI 파이프라인
                                                               │  PostgreSQL/pgvector 직접 기록
-[Spring] <--소비-- (resume.parse.status.changed) <--XADD-- (단계마다)
-   └─ SSE로 프론트에 실시간 push
+[Spring 전 인스턴스] <--SUBSCRIBE-- (resume.parse.status.changed) <--PUBLISH(JSON)-- (단계마다)
+   └─ SSE 연결을 가진 인스턴스가 프론트에 실시간 push
 ```
 
 - 스택: **FastStream(Redis 브로커) + uv(잠금 uv.lock) + Python 3.13**
-- 연동 인프라: Redis 스트림 2개, PostgreSQL(pgvector), S3/MinIO, AWS Bedrock(LLM·임베딩)
+- 연동 인프라: Redis 스트림 1개(요청) + Pub/Sub 채널 1개(상태), PostgreSQL(pgvector), S3/MinIO,
+  AWS Bedrock(LLM·임베딩)
 - 불변 원칙: **모든 분석 요청은 반드시 `EMBEDDED` 또는 `FAILED`로 종결한다.**
 
 ---
@@ -44,7 +46,12 @@ Redis Stream 필드는 **전부 문자열**이다. 아래 인코딩 규칙이 Ja
 - 5필드는 mode와 무관하게 **전부 필수**(조건부 스키마 회피). REINDEX에서 bucket/objectKey는 존재는
   하되 Worker가 무시한다.
 
-### 1.2 상태 메시지 — `resume.parse.status.changed` (발행)
+### 1.2 상태 메시지 — `resume.parse.status.changed` (Pub/Sub 채널에 JSON 발행)
+
+채널 이름은 예전 스트림 키와 같은 문자열이다. 페이로드는 아래 필드맵을 JSON 문자열로 직렬화한
+것이고 값은 전부 문자열이다. 예: `{"resumeId":"1","userId":"4","status":"PARSED","message":""}`.
+Pub/Sub은 저장하지 않으므로 구독자(Spring)가 없는 동안 발행된 알림은 사라진다 — SSE 유실 복구는
+REST 조회가 담당한다(§3). 배포 순서도 Spring(구독) → Worker(발행)여야 한다.
 
 | 필드 | 논리 타입 | 직렬화 | 비고 |
 |---|---|---|---|
@@ -431,3 +438,6 @@ Content-Type: application/json
   동시에 처리하게 하고, 커넥션 풀을 두 경로가 같이 쓰도록 변경(설정 이름 `sync_pool_*` → `db_pool_*`).
   인스턴스 증설 대신 프로세스 안 동시성으로 확장. N ≤ P 기동 검증. 두 모드의 워커 동시 처리 수를
   같게 맞춰야 통제된 비교가 됨. → §11.4.
+- 2026-09-05 Spring 2대에서 SSE 상태 알림이 절반쯤 유실(HBB1-332) — 상태 스트림을 Consumer Group 하나로
+  읽어 메시지가 인스턴스에 나뉘고, SSE 연결이 없는 쪽 몫은 버려짐. 상태 발행을 Redis Pub/Sub(같은 이름의
+  채널, JSON 페이로드)으로 전환해 전 인스턴스가 받게 함. 요청 스트림·소비 코드는 불변. → §1.2.

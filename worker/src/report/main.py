@@ -38,7 +38,7 @@ from src.report.audio_pipeline import process_audio_request
 from src.report.evaluator import Evaluator, build_evaluator
 from src.report.pipeline import process_generation_request
 from src.report.repository import complete_overdue_audio, ensure_schema
-from src.report.streams import publish_status
+from src.report.publish import publish_status
 from src.storage.repository import connect
 
 logger = logging.getLogger(__name__)
