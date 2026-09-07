@@ -117,6 +117,21 @@ class Settings(BaseSettings):
             )
         return self
 
+    @model_validator(mode="after")
+    def _validate_audio_grace(self) -> "Settings":
+        """유예 완성 설정 기동 검증 — 잘못된 값이 조용히 문제를 만들기 전에 막는다 (CodeRabbit 리뷰 반영)."""
+        if self.audio_grace_seconds < 0:
+            raise ValueError(
+                f"audio_grace_seconds({self.audio_grace_seconds})는 0 이상이어야 한다 — "
+                "음수면 마감이 미래가 되어 음성을 기다리는 리포트가 즉시 완성된다"
+            )
+        if self.audio_grace_poll_interval_s <= 0:
+            raise ValueError(
+                f"audio_grace_poll_interval_s({self.audio_grace_poll_interval_s})는 0보다 커야 한다 — "
+                "0 이하면 유예 완성 주기 작업이 쉬지 않고 돈다"
+            )
+        return self
+
     @property
     def resolved_consumer_name(self) -> str:
         """consumer_name 이 비어 있으면 hostname 으로 대체."""
