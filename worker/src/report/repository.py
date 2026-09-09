@@ -23,13 +23,14 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from psycopg import AsyncConnection, errors
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel
 
 from src.contract import ImprovementTask, ReportStatus, Utterance, WeaknessTagCount
+from src.report.audio import VOICE_WEAKNESS_TAGS
 
 logger = logging.getLogger(__name__)
 
@@ -338,11 +339,108 @@ async def save_text_results(
                     for f in feedbacks
                 ],
             )
+        # 태그 요약은 텍스트 상위 3 + 음성 태그(2단계가 먼저 끝났으면 이미 있음)를 합친다.
+        # 행 잠금으로 음성 단계의 동시 갱신과 서로의 몫을 지우지 않게 한다.
+        existing = await _lock_tag_summary(conn, report_id)
+        voice = [t for t in existing if t.tag in VOICE_WEAKNESS_TAGS]
         await conn.execute(
             "UPDATE reports SET summary = %s, weakness_tag_summary = %s, "
             "text_analyzed_at = %s, updated_at = %s WHERE id = %s",
-            (summary, Jsonb([t.model_dump() for t in tag_summary]), now, now, report_id),
+            (summary, _tags_jsonb(list(tag_summary) + voice), now, now, report_id),
         )
+
+
+# ---------------------------------------------------------------- 산출물 (음성 2단계)
+
+def _tags_jsonb(tags: list[WeaknessTagCount]) -> Jsonb:
+    return Jsonb([t.model_dump() for t in tags])
+
+
+async def _lock_tag_summary(conn: AsyncConnection, report_id: int) -> list[WeaknessTagCount]:
+    """reports 행을 잠그고(FOR UPDATE) 현재 태그 요약을 읽는다 — 두 단계의 병합 갱신 직렬화."""
+    cur = await conn.execute(
+        "SELECT weakness_tag_summary FROM reports WHERE id = %s FOR UPDATE", (report_id,)
+    )
+    row = await cur.fetchone()
+    if row is None or not row["weakness_tag_summary"]:
+        return []
+    return [WeaknessTagCount.model_validate(t) for t in row["weakness_tag_summary"]]
+
+
+async def save_audio_result(
+    conn: AsyncConnection,
+    report_id: int,
+    *,
+    delivery_score: int | None,
+    voice_tags: list[WeaknessTagCount],
+) -> bool:
+    """음성 분석(2단계) 산출물 저장 — delivery_score(측정 불가면 NULL) + audio_analyzed_at
+    + 태그 요약의 음성 태그 갈아끼우기. 한 트랜잭션.
+
+    **종결(COMPLETED·FAILED) 리포트에는 적용하지 않는다** — COMPLETED 는 이미 보여준
+    점수를 사후에 바꾸지 않기 위해(백엔드 PRD §5, 음성 없이 유예 완성된 리포트 포함),
+    FAILED 는 생성이 실패한 리포트에 음성 산출물을 얹지 않기 위해(2026-09-05 결정).
+    상태는 바꾸지 않는다(완성 판정은 try_complete).
+    반환: 저장했으면 True, 종결 상태라 건너뛰었으면 False.
+    """
+    now = _utcnow()
+    async with conn.transaction():
+        existing = await _lock_tag_summary(conn, report_id)
+        text_tags = [t for t in existing if t.tag not in VOICE_WEAKNESS_TAGS]
+        cur = await conn.execute(
+            """
+            UPDATE reports
+            SET delivery_score = %(score)s, audio_analyzed_at = %(now)s,
+                weakness_tag_summary = %(tags)s, updated_at = %(now)s
+            WHERE id = %(rid)s AND status IN (%(pending)s, %(processing)s)
+            """,
+            {
+                "score": delivery_score,
+                "now": now,
+                "tags": _tags_jsonb(text_tags + list(voice_tags)),
+                "rid": report_id,
+                "pending": ReportStatus.PENDING.value,
+                "processing": ReportStatus.PROCESSING.value,
+            },
+        )
+        return cur.rowcount == 1
+
+
+async def complete_overdue_audio(conn: AsyncConnection, grace_seconds: float) -> list[dict]:
+    """유예 완성 — 텍스트는 끝났는데 음성 분석이 유예 시간을 넘긴 리포트를 delivery NULL 로
+    COMPLETED 처리한다(백엔드 PRD §1 "음성 분석이 늦으면 기다리지 않고 완성한다").
+
+    기준 시각은 text_analyzed_at 이다 — 녹음 업로드는 세션 종료 직후, 텍스트 분석은 그보다
+    늦게 끝나므로 "텍스트 완료 후에도 음성이 없다"가 실제 지연의 신호다. overall 은 텍스트
+    3축 평균. 음성 소비자와의 경쟁은 조건부 UPDATE(audio_analyzed_at IS NULL) 가 가른다 —
+    먼저 커밋한 쪽만 유효하고, 늦은 쪽은 0행 또는 종결 스킵으로 끝난다.
+    반환: 완성된 리포트의 (id, user_id) — 호출자가 상태 이벤트를 발행한다.
+    """
+    now = _utcnow()
+    cur = await conn.execute(
+        """
+        UPDATE reports r
+        SET status = %(completed)s, overall_score = sub.overall,
+            completed_at = %(now)s, updated_at = %(now)s
+        FROM (
+            SELECT s.report_id,
+                   round((s.logic_score + s.specificity_score + s.technical_accuracy_score)
+                         ::numeric / 3) AS overall
+            FROM report_scores s
+        ) sub
+        WHERE sub.report_id = r.id AND r.status = %(processing)s
+          AND r.text_analyzed_at IS NOT NULL AND r.audio_analyzed_at IS NULL
+          AND r.text_analyzed_at < %(deadline)s
+        RETURNING r.id, r.user_id
+        """,
+        {
+            "completed": ReportStatus.COMPLETED.value,
+            "processing": ReportStatus.PROCESSING.value,
+            "now": now,
+            "deadline": now - timedelta(seconds=grace_seconds),
+        },
+    )
+    return await cur.fetchall()
 
 
 # ---------------------------------------------------------------- Job 운영 기록

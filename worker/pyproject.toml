@@ -19,6 +19,11 @@ dependencies = [
     "pydantic",
     "pydantic-settings",
     "uvicorn>=0.52.4",
+    # 녹음 디코딩(OGG/Opus — libsndfile 번들, ffmpeg 불필요) + 신호 처리
+    "soundfile>=0.14.0",
+    "numpy>=2.5.2",
+    # Silero VAD 실행 (ONNX 모델 — torch 불필요)
+    "onnxruntime>=1.29.0",
 ]
 
 [dependency-groups]

@@ -57,3 +57,26 @@ def test_풀_크기_0은_기동_실패():
 def test_풀_크기_1은_정상():
     s = Settings(stream_max_workers=1, db_pool_max_size=1)
     assert s.db_pool_max_size == 1
+
+
+def test_유예_시간_음수는_기동_실패():
+    import pytest
+
+    with pytest.raises(ValueError, match="audio_grace_seconds"):
+        Settings(audio_grace_seconds=-1)
+
+
+def test_유예_시간_0은_정상():
+    assert Settings(audio_grace_seconds=0).audio_grace_seconds == 0
+
+
+def test_유예_폴링_간격_0_이하는_기동_실패():
+    import pytest
+
+    for value in (0, -1):
+        with pytest.raises(ValueError, match="audio_grace_poll_interval_s"):
+            Settings(audio_grace_poll_interval_s=value)
+
+
+def test_유예_폴링_간격_양수는_정상():
+    assert Settings(audio_grace_poll_interval_s=5).audio_grace_poll_interval_s == 5

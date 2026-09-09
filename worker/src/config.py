@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     # "확정 전까지 Worker는 텍스트 3축으로만 동작하고 delivery_score는 null").
     # 음성 분석 소비자가 배포될 때 True 로 켜면 "텍스트·음성 둘 다 완료" 판정으로 바뀐다.
     audio_analysis_enabled: bool = False
+    # 유예 완성 — 텍스트 분석 완료 후 이 시간 안에 음성 분석이 끝나지 않으면 전달력 없이
+    # 완성한다(백엔드 PRD §1). 값은 잠정(녹음 업로드 소요 실측 후 확정 — PRD "미정").
+    # audio_analysis_enabled 가 켜져 있을 때만 돈다(꺼져 있으면 텍스트만으로 즉시 완성).
+    audio_grace_seconds: float = 600.0
+    audio_grace_poll_interval_s: float = 60.0
 
     # --- AI 제공자 선택 (§8) ---
     # "fake" = 가짜(로컬/테스트, 클라우드 없이) / "bedrock" = 실제(클라우드 준비 후)
@@ -109,6 +114,21 @@ class Settings(BaseSettings):
                 f"stream_max_workers({self.stream_max_workers})는 "
                 f"db_pool_max_size({self.db_pool_max_size}) 이하여야 한다 — "
                 "스트림 동시 작업이 풀보다 많으면 연결 대기로 동시성이 풀 크기로 깎인다"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_audio_grace(self) -> "Settings":
+        """유예 완성 설정 기동 검증 — 잘못된 값이 조용히 문제를 만들기 전에 막는다 (CodeRabbit 리뷰 반영)."""
+        if self.audio_grace_seconds < 0:
+            raise ValueError(
+                f"audio_grace_seconds({self.audio_grace_seconds})는 0 이상이어야 한다 — "
+                "음수면 마감이 미래가 되어 음성을 기다리는 리포트가 즉시 완성된다"
+            )
+        if self.audio_grace_poll_interval_s <= 0:
+            raise ValueError(
+                f"audio_grace_poll_interval_s({self.audio_grace_poll_interval_s})는 0보다 커야 한다 — "
+                "0 이하면 유예 완성 주기 작업이 쉬지 않고 돈다"
             )
         return self
 
