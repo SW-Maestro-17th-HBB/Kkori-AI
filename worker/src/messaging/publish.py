@@ -8,7 +8,6 @@
 - FastStream 기본 발행은 `__data__` 봉투로 감싸므로 쓰지 않고, redis 커넥션으로 직접 PUBLISH 한다.
 
 요청 스트림(`resume.parse.requested`) 소비는 그대로 Stream + Consumer Group 이다.
-전달 횟수 조회는 도메인 공통이라 `messaging.pel` 로 옮겼다.
 """
 
 from __future__ import annotations

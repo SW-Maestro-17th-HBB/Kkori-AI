@@ -4,8 +4,6 @@
 하므로 스트림이 아니라 Pub/Sub 으로 보내고(HBB1-332), FastStream 기본 발행(__data__ 봉투)
 대신 redis 커넥션으로 직접 PUBLISH 한다. 발행 계약(ReportStatusChanged)이 도메인 소유라
 모듈을 따로 둔다.
-
-전달 횟수 조회는 도메인 공통이라 `messaging.pel` 을 쓴다.
 """
 
 from __future__ import annotations

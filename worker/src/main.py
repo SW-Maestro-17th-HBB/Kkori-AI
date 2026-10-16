@@ -3,9 +3,8 @@
 `resume.parse.requested` 를 consumer group 으로 소비해 분석 파이프라인
 (`analysis.pipeline`)을 태우고, 단계마다 상태를 발행한다(`messaging.publish`).
 
-구독자는 둘이다 — 새 메시지용과 방치 메시지 회수용. `StreamSub` 에 `min_idle_time` 을
-주면 XREADGROUP 대신 XAUTOCLAIM 을 도는 회수 전용 모드가 되어 갓 들어온 메시지를 못
-읽으므로(실측 확인), 한 구독자가 둘 다 할 수 없어 나눈다.
+구독자는 하나다 — `StreamSub(claim_min_idle_time=...)` 로 XREADGROUP CLAIM(Redis 8.4+)을
+써서, 읽을 때마다 방치된 메시지를 먼저 가져오고 새 메시지도 함께 받는다.
 
 동기 디스패치 실험(PRD §11)으로 같은 프로세스에 HTTP 엔드포인트
 (`POST /internal/analyses/resume`)도 서빙한다 — 앱은 `AsgiFastStream`.
@@ -35,7 +34,7 @@ from src.analysis.pipeline import process_request
 from src.config import Settings, get_settings
 from src.contract import AnalysisStatus, ParseRequest
 from src.contract.fields import decode_fields
-from src.messaging.pel import get_delivery_count
+from src.messaging.claim import ensure_claim_supported, entry_of
 from src.messaging.publish import publish_status
 from src.storage.repository import (
     connect,
@@ -140,6 +139,7 @@ async def _process(
 
 @app.on_startup
 async def startup() -> None:
+    await ensure_claim_supported(settings.redis_url)
     schema_conn = await connect(settings)
     try:
         await ensure_schema(schema_conn, dim=settings.embedding_dim)
@@ -160,40 +160,15 @@ async def shutdown() -> None:
         _Resources.pool = None
 
 
-async def _delivery_count_of(redis: Redis, msg: RedisStreamMessage) -> int:
-    """포기 규칙(§4) 판단 근거 — 이 메시지의 전달 횟수 (message id 없으면 1로 간주)."""
-    message_ids = msg.raw_message.get("message_ids") or []
-    if not message_ids:
-        return 1
-    return await get_delivery_count(
-        redis, ParseRequest.STREAM_KEY, settings.consumer_group, message_ids[0]
-    )
+async def handle_entry(
+    redis: Redis, message_id: bytes, fields: dict, delivery_count: int
+) -> None:
+    """메시지 한 건 처리 — 계약 위반은 제거하고, 처리 실패는 PEL 에 남긴다.
 
-
-@broker.subscriber(
-    stream=StreamSub(
-        ParseRequest.STREAM_KEY,
-        group=settings.consumer_group,
-        consumer=settings.resolved_consumer_name,
-    ),
-    # 동시 소비 (§11.4) — 1 이면 기존 순차, >1 이면 StreamConcurrentSubscriber 로
-    # N 건을 동시에 처리한다. ACK 는 동시에서도 메시지별·핸들러 완료 후라 PEL 회수 설계 유지.
-    max_workers=settings.stream_max_workers,
-)
-async def handle_parse_requested(request: ParseRequest, msg: RedisStreamMessage) -> None:
-    """새 분석 요청 처리 진입점.
-
-    정상 반환 = ACK(종결·스킵·양보·포기), 예외 = PEL 잔류 → 회수 대상.
-    """
-    delivery_count = await _delivery_count_of(broker._connection, msg)
-    await _process(request, delivery_count, broker._connection)
-
-
-async def reclaim_one(redis: Redis, message_id: bytes, fields: dict) -> None:
-    """회수된 메시지 한 건 처리 — 계약 위반은 제거하고, 처리 실패는 PEL 에 남긴다.
-
-    ACK 을 직접 가르므로 구독자는 `AckPolicy.MANUAL` 이다. 구독 배관에서 떼어놓아
-    실제 XAUTOCLAIM 결과를 그대로 넘겨 테스트할 수 있게 한다.
+    새 메시지와 회수한 메시지가 같은 경로를 탄다. 2번째 이상 전달이면 앞선 전달이 ACK 없이
+    끝난 것이라 같은 런의 재개(`is_reclaimed`)로 처리한다. ACK 을 직접 가르므로 구독자는
+    `AckPolicy.MANUAL` 이다. 구독 배관에서 떼어놓아 실제 XREADGROUP 결과를 그대로 넘겨
+    테스트할 수 있게 한다.
     """
 
     async def ack() -> None:
@@ -203,43 +178,39 @@ async def reclaim_one(redis: Redis, message_id: bytes, fields: dict) -> None:
         request = ParseRequest.decode(decode_fields(fields))
     except Exception:
         # 형식이 틀린 메시지는 재처리도, FAILED 기록도 불가능하다(resumeId 를 못 읽음).
-        # ACK 하지 않으면 폴링마다 재회수가 반복되므로, 원본 필드를 로그에 남기고 제거한다.
+        # ACK 하지 않으면 회수가 계속 반복되므로, 원본 필드를 로그에 남기고 제거한다.
         logger.exception("형식 위반 메시지 제거 (id=%s, fields=%r)", message_id, fields)
         await ack()
         return
 
     try:
-        delivery_count = await get_delivery_count(
-            redis, ParseRequest.STREAM_KEY, settings.consumer_group, message_id
-        )
-        await _process(request, delivery_count, redis, is_reclaimed=True)
+        await _process(request, delivery_count, redis, is_reclaimed=delivery_count > 1)
         await ack()
     except Exception:
-        # ACK 하지 않아 PEL 에 남고 다음 폴링의 회수 대상이 된다.
-        logger.exception("회수 재처리 실패 (resumeId=%s)", request.resumeId)
+        # ACK 하지 않아 PEL 에 남고, claim_min_idle_ms 가 지나면 다시 회수된다.
+        logger.exception("분석 처리 실패 (resumeId=%s)", request.resumeId)
 
 
 @broker.subscriber(
     stream=StreamSub(
         ParseRequest.STREAM_KEY,
         group=settings.consumer_group,
-        consumer=settings.reclaim_consumer_name,
-        # min_idle_time 을 주면 XREADGROUP 대신 XAUTOCLAIM 을 도는 회수 전용 구독자가 된다.
-        min_idle_time=settings.claim_min_idle_ms,
-        polling_interval=settings.reclaim_poll_interval_ms,
+        consumer=settings.resolved_consumer_name,
+        # XREADGROUP CLAIM — 읽을 때마다 이 시간 넘게 방치된 메시지를 먼저 가져온다.
+        claim_min_idle_time=settings.claim_min_idle_ms,
     ),
     ack_policy=AckPolicy.MANUAL,
+    # 동시 소비 (§11.4) — 1 이면 기존 순차, >1 이면 StreamConcurrentSubscriber 로
+    # N 건을 동시에 처리한다. ACK 는 동시에서도 메시지별·핸들러 완료 후라 PEL 회수 설계 유지.
+    max_workers=settings.stream_max_workers,
 )
-async def handle_reclaimed(msg: RedisStreamMessage, redis: InjectedRedis) -> None:
-    """회수 구독자 — 배선만 하고 처리는 `reclaim_one` 이 한다.
+async def handle_parse_requested(msg: RedisStreamMessage, redis: InjectedRedis) -> None:
+    """분석 요청 구독자 — 배선만 하고 처리는 `handle_entry` 가 한다.
 
     `redis` 는 FastStream 이 Context 로 넣어주는 커넥션이다. `redis.asyncio.Redis` 를
     그대로 힌트로 쓰면 주입되지 않고 검증 오류가 난다.
     """
-    message_ids = msg.raw_message.get("message_ids") or []
-    if not message_ids:  # 회수 경로는 항상 한 건씩 오지만 방어적으로
-        return
-    await reclaim_one(redis, message_ids[0], msg.raw_message["data"])
+    await handle_entry(redis, *entry_of(msg))
 
 
 # ------------------------------------------------- 동기 디스패치 실험 (PRD §11)

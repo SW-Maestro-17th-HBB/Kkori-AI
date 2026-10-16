@@ -3,7 +3,7 @@
 핵심 계약: **2xx = EMBEDDED 종결까지 완료**. 스트림 경로와 같은 배선(`_process`)을
 타므로 상태 이벤트 발행까지 동일해야 한다(§11.2 공정 비교 조건).
 HTTP 파싱·라우팅은 test_main 배선 테스트가, 처리·판정은 `analyze_sync` 직접 호출로
-검증한다(`reclaim_one` 직접 호출 테스트와 같은 스타일).
+검증한다(`handle_entry` 직접 호출 테스트와 같은 스타일).
 """
 
 import asyncio

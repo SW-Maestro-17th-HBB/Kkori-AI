@@ -119,7 +119,7 @@ async def process_request(
 ) -> None:
     """요청 1건 처리. 정상 반환 = ACK(종결/스킵/양보), 예외 = PEL 잔류(재시도 대상).
 
-    is_reclaimed: 회수(XAUTOCLAIM) 경로 여부. 신규 메시지는 새 런이라 retry_count 를 0으로
+    is_reclaimed: 회수한 메시지(2번째 이상 전달)인지 여부. 신규 메시지는 새 런이라 retry_count 를 0으로
     리셋하지만, 회수 재개는 같은 런의 연장이라 리셋하지 않는다 (§3.2, §6).
     """
 
