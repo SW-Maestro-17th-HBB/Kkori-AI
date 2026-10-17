@@ -25,7 +25,7 @@ docker build -f worker/Dockerfile -t kkori-worker .
 ```
 
 - 에이전트 실행에는 `agent/.env`에 LiveKit Cloud 자격증명(STT·TTS·룸)과 AWS 자격증명(Bedrock LLM) 필요 (`agent/.env.example` 참조, Git 비추적)
-- agent는 `agent/tests/` 운용 중 — 단위 테스트(파싱·프롬프트 조립·선택 폴백)는 항상 실행, LLM 스모크 테스트(유료 실호출)는 `KKORI_LIVE_LLM=1` + 프로바이더 자격증명(bedrock 기본 → AWS 키, inference → LiveKit 키)이 있을 때만 실행(기본 skip — CI 포함). worker는 `worker/tests/` 운용 중 — 일부 테스트는 로컬 인프라(Postgres/Redis/MinIO) 없으면 skip, CI에서는 서비스 컨테이너로 전부 실행
+- agent는 `agent/tests/` 운용 중 — 단위 테스트(파싱·프롬프트 조립·선택 폴백)는 항상 실행, LLM 스모크 테스트(유료 실호출)는 `KKORI_LIVE_LLM=1` + 프로바이더 자격증명(bedrock 기본 → AWS 키, inference → LiveKit 키)이 있을 때만 실행(기본 skip — CI 포함). worker는 `worker/tests/` 운용 중 — 일부 테스트는 로컬 인프라(Postgres/Redis/RustFS) 없으면 skip, CI에서는 서비스 컨테이너로 전부 실행
 
 ## 작업 규칙
 
@@ -54,7 +54,7 @@ docker build -f worker/Dockerfile -t kkori-worker .
 - PR 제목은 `<타입>: [HBB1-<지라번호>] <요약>` 형식 (예: `feat: [HBB1-263] livekit-agents 및 기본 플러그인 연동`) — 지라 키가 제목에 있으면 GitHub for Atlassian이 티켓에 자동 연결
 - PR 본문은 템플릿(관련 이슈 / 실행 검증 / PRD 경로 / 완료 조건) 준수 — 완료 조건은 PRD에서 발췌한 검증 가능한 문장으로 작성하고, 체크는 검증된 후에만
 - CodeRabbit이 develop 대상 PR을 자동 리뷰 (draft는 제외 — ready 전환 시점에 리뷰 시작, 이후 커밋은 증분 리뷰). 재리뷰가 필요하면 `@coderabbitai review` 코멘트
-- CI(GitHub Actions)는 agent/worker 경로별 워크플로우가 main/develop 대상 push·PR에서 실행 — agent는 `uv sync --locked` + import 검증 + pytest, worker는 `uv sync --locked` + 서비스 컨테이너(Postgres/Redis/MinIO) 기동 후 pytest 전체 실행
+- CI(GitHub Actions)는 agent/worker 경로별 워크플로우가 main/develop 대상 push·PR에서 실행 — agent는 `uv sync --locked` + import 검증 + pytest, worker는 `uv sync --locked` + 서비스 컨테이너(Postgres/Redis/RustFS) 기동 후 pytest 전체 실행
 
 ## 문서 참조 맵
 

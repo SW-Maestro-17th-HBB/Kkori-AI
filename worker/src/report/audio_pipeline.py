@@ -41,7 +41,7 @@ class ReportNotReady(Exception):
 
 
 def download_object(s3_client, bucket: str, object_key: str) -> bytes:
-    """S3/MinIO 객체 다운로드 — blocking. 이력서 PDF 다운로드와 같은 경로."""
+    """S3 객체 다운로드 — blocking. 이력서 PDF 다운로드와 같은 경로."""
     response = s3_client.get_object(Bucket=bucket, Key=object_key)
     return response["Body"].read()
 

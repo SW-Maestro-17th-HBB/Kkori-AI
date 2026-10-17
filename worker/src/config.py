@@ -2,7 +2,7 @@
 
 접두사 `KKORI_WORKER_` 를 붙인 환경변수로 아래 값을 덮어쓴다
 (예: `KKORI_WORKER_DELIVERY_COUNT_THRESHOLD=5`).
-기본값은 로컬 docker-compose(Postgres 5432 / Redis 6379 / MinIO 9000)에 맞춰져 있어
+기본값은 로컬 docker-compose(Postgres 5432 / Redis 6379 / RustFS 9000)에 맞춰져 있어
 로컬에선 그대로 동작하고, dev/prod 는 환경변수로 주입한다.
 
 관련: PRD §8(AI/인프라), §9(재량 파라미터), §2.5(청킹).
@@ -30,12 +30,12 @@ class Settings(BaseSettings):
     # --- PostgreSQL (resume_chunks·상태 직접 기록) ---
     postgres_dsn: str = "postgresql://kkori:kkori@localhost:5432/kkori"
 
-    # --- S3 / MinIO (이력서 PDF 다운로드) ---
-    # 로컬은 MinIO 엔드포인트, 실서버는 빈값으로 두면 boto3 기본 동작(실제 S3 + IAM Role).
+    # --- S3 (이력서 PDF 다운로드) ---
+    # 로컬은 RustFS(S3 호환) 엔드포인트, 실서버는 빈값으로 두면 boto3 기본 동작(실제 S3 + IAM Role).
     s3_endpoint_url: str = "http://localhost:9000"
     s3_region: str = "ap-northeast-2"
     # 자격증명 — 빈값이면 boto3 기본 체인(IAM Role·환경변수·~/.aws)에 맡긴다.
-    # 로컬 MinIO 는 .env 로 주입 (docker-compose 기본: kkori / kkori1234).
+    # 로컬 RustFS 는 .env 로 주입 (docker-compose 기본: kkori / kkori1234).
     s3_access_key: str = ""
     s3_secret_key: str = ""
 

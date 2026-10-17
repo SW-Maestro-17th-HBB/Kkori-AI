@@ -15,7 +15,7 @@ Worker는 Spring 백엔드가 발행한 이력서 분석 요청을 Redis Stream�
 
 ```
 [Spring] --XADD--> (resume.parse.requested) --XREADGROUP--> [Worker]
-                                                              │  S3/MinIO 다운로드
+                                                              │  S3 다운로드
                                                               │  AI 파이프라인
                                                               │  PostgreSQL/pgvector 직접 기록
 [Spring 전 인스턴스] <--SUBSCRIBE-- (resume.parse.status.changed) <--PUBLISH(JSON)-- (단계마다)
@@ -23,7 +23,7 @@ Worker는 Spring 백엔드가 발행한 이력서 분석 요청을 Redis Stream�
 ```
 
 - 스택: **FastStream(Redis 브로커) + uv(잠금 uv.lock) + Python 3.13**
-- 연동 인프라: Redis 스트림 1개(요청) + Pub/Sub 채널 1개(상태), PostgreSQL(pgvector), S3/MinIO,
+- 연동 인프라: Redis 스트림 1개(요청) + Pub/Sub 채널 1개(상태), PostgreSQL(pgvector), S3,
   AWS Bedrock(LLM·임베딩)
 - 불변 원칙: **모든 분석 요청은 반드시 `EMBEDDED` 또는 `FAILED`로 종결한다.**
 
@@ -39,7 +39,7 @@ Redis Stream 필드는 **전부 문자열**이다. 아래 인코딩 규칙이 Ja
 |---|---|---|---|
 | `resumeId` | Long | `str(long)` | |
 | `userId` | Long | `str(long)` | 상태 메시지에 **에코** (SSE 사용자 라우팅 근거) |
-| `bucket` | String | 그대로 | S3/MinIO 버킷. REINDEX에선 무시 |
+| `bucket` | String | 그대로 | S3 버킷. REINDEX에선 무시 |
 | `objectKey` | String | 그대로 | 객체 키. REINDEX에선 무시 |
 | `mode` | enum | `FULL` \| `REINDEX` | 5필드 전부 필수 — 모드 무관 |
 
@@ -288,7 +288,7 @@ at-least-once + CLAIM 회수는 **실제로 죽지 않은 원본과 회수본이
   v4 만 제공되어 상위 호환인 v4 로 변경(2026-07-21) — **출력 차원을 1024 로 지정**해 `vector(1024)` 스키마는
   그대로 유지한다. 색인은 `input_type=search_document`, 질의 시 `search_query`로 **비대칭 임베딩** 사용(동일 지원).
 - 인증: 단일 IAM 원칙(백엔드 dev/prod S3 IAM Role 패턴과 일치).
-- **로컬 주의**: Bedrock은 로컬 에뮬레이터가 없다(MinIO=S3 로컬과 다름). 실제 제공자를 로컬에서 쓰면 실제 Bedrock
+- **로컬 주의**: Bedrock은 로컬 에뮬레이터가 없다(S3는 로컬에 RustFS가 있는 것과 다름). 실제 제공자를 로컬에서 쓰면 실제 Bedrock
   호출 → AWS 자격증명·리전 필요, 로컬에서도 과금.
 - **리전: us-east-1 (조직 정책상 강제)**(2026-07-21 실 호출 탐침으로 확정). 당초 서울(ap-northeast-2)을
   원했으나, 계정이 소속된 조직(SW마에스트로 발급)의 **SCP 가 Bedrock 호출을 us-east-1 에서만 허용**한다 —
