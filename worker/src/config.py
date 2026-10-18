@@ -2,7 +2,7 @@
 
 접두사 `KKORI_WORKER_` 를 붙인 환경변수로 아래 값을 덮어쓴다
 (예: `KKORI_WORKER_DELIVERY_COUNT_THRESHOLD=5`).
-기본값은 로컬 docker-compose(Postgres 5432 / Redis 6379 / MinIO 9000)에 맞춰져 있어
+기본값은 로컬 docker-compose(Postgres 5432 / Redis 6379 / RustFS 9000)에 맞춰져 있어
 로컬에선 그대로 동작하고, dev/prod 는 환경변수로 주입한다.
 
 관련: PRD §8(AI/인프라), §9(재량 파라미터), §2.5(청킹).
@@ -30,12 +30,12 @@ class Settings(BaseSettings):
     # --- PostgreSQL (resume_chunks·상태 직접 기록) ---
     postgres_dsn: str = "postgresql://kkori:kkori@localhost:5432/kkori"
 
-    # --- S3 / MinIO (이력서 PDF 다운로드) ---
-    # 로컬은 MinIO 엔드포인트, 실서버는 빈값으로 두면 boto3 기본 동작(실제 S3 + IAM Role).
+    # --- S3 (이력서 PDF 다운로드) ---
+    # 로컬은 RustFS(S3 호환) 엔드포인트, 실서버는 빈값으로 두면 boto3 기본 동작(실제 S3 + IAM Role).
     s3_endpoint_url: str = "http://localhost:9000"
     s3_region: str = "ap-northeast-2"
     # 자격증명 — 빈값이면 boto3 기본 체인(IAM Role·환경변수·~/.aws)에 맡긴다.
-    # 로컬 MinIO 는 .env 로 주입 (docker-compose 기본: kkori / kkori1234).
+    # 로컬 RustFS 는 .env 로 주입 (docker-compose 기본: kkori / kkori1234).
     s3_access_key: str = ""
     s3_secret_key: str = ""
 
@@ -73,11 +73,7 @@ class Settings(BaseSettings):
 
     # --- 재량 파라미터 (§9) ---
     delivery_count_threshold: int = 3  # 이상이면 재처리 없이 FAILED (§4 — 판정은 >=)
-    claim_min_idle_ms: int = 300_000  # XAUTOCLAIM 회수 대상 판정(5분)
-    # 회수 구독자의 폴링 간격 — 최악 복구 지연 = min_idle + 이 값.
-    # min_idle 이 5분이라 지연 하한은 어차피 5분이므로, 더 촘촘히 돌려도 얻는 게 없고
-    # XAUTOCLAIM 호출량만 늘어난다(100ms 면 하루 86만 회, 5s 면 1.7만 회).
-    reclaim_poll_interval_ms: int = 5_000
+    claim_min_idle_ms: int = 300_000  # XREADGROUP CLAIM 회수 대상 판정(5분)
     retry_max_attempts: int = 3  # 외부 호출(S3·LLM·임베딩) 내부 재시도 최대 시도 수 (§9)
     retry_base_delay_s: float = 1.0  # 지수 백오프 시작 간격 — 1s → 2s → 4s
 
@@ -136,15 +132,6 @@ class Settings(BaseSettings):
     def resolved_consumer_name(self) -> str:
         """consumer_name 이 비어 있으면 hostname 으로 대체."""
         return self.consumer_name or socket.gethostname()
-
-    @property
-    def reclaim_consumer_name(self) -> str:
-        """회수 구독자의 컨슈머 이름 — 새 메시지 구독자와 나눠 XINFO CONSUMERS 에서 구분한다.
-
-        같은 그룹 안에서 이름이 갈리므로 어느 쪽이 몇 건을 들고 있는지 따로 보인다.
-        두 워커(이력서·리포트)는 그룹이 달라 이름을 공유해도 부딪히지 않는다.
-        """
-        return f"{self.resolved_consumer_name}-reclaimer"
 
     @property
     def s3_endpoint(self) -> str | None:

@@ -79,7 +79,7 @@ async def process_generation_request(
 ) -> None:
     """생성 요청 1건 처리.
 
-    is_reclaimed: 회수(XAUTOCLAIM) 경로 여부. 신규 메시지는 새 런이라 retry_count 를
+    is_reclaimed: 회수한 메시지(2번째 이상 전달)인지 여부. 신규 메시지는 새 런이라 retry_count 를
     리셋하고 진행 중(PROCESSING) 로우를 만나면 양보하지만, 회수 경로는 이전 처리자가
     죽었다는 판정이므로 리셋 없이 이어서 재개한다.
     """

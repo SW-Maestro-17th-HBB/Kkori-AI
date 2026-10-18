@@ -11,6 +11,7 @@ import pytest_asyncio
 
 from src.config import Settings
 from src.contract import AnalysisStatus
+from src.messaging.claim import supports_claim
 from src.report import repository as report_repository
 from src.storage.repository import connect, ensure_schema
 
@@ -34,6 +35,25 @@ def postgres_available() -> bool:
 
 requires_postgres = pytest.mark.skipif(
     not postgres_available(), reason="로컬 PostgreSQL(5432) 없음 — DB 테스트 건너뜀"
+)
+
+
+def redis_with_claim_available() -> bool:
+    """Redis 접속 + XREADGROUP CLAIM 지원(8.4+) 여부까지 확인."""
+    import redis as sync_redis
+
+    try:
+        version = sync_redis.Redis(
+            host="localhost", port=6379, socket_connect_timeout=2
+        ).info("server")["redis_version"]
+    except Exception:
+        return False
+    return supports_claim(version)
+
+
+requires_redis_with_claim = pytest.mark.skipif(
+    not redis_with_claim_available(),
+    reason="로컬 Redis(6379) 없음 또는 8.4 미만(XREADGROUP CLAIM 미지원)",
 )
 
 

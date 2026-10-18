@@ -1,4 +1,4 @@
-"""텍스트 추출 — S3/MinIO 다운로드 + PyMuPDF (PRD §2.1).
+"""텍스트 추출 — S3 다운로드 + PyMuPDF (PRD §2.1).
 
 FULL 파이프라인 2단계(TEXT_EXTRACTING)의 재료:
 - S3 에서 원본 PDF 를 내려받아 전체 페이지의 텍스트를 추출해 **반환만** 한다.
@@ -16,7 +16,7 @@ from src.config import Settings
 
 
 def build_s3_client(settings: Settings):
-    """S3/MinIO 클라이언트. 자격증명이 설정에 없으면 boto3 기본 체인(IAM Role 등)에 맡긴다."""
+    """S3 클라이언트. 자격증명이 설정에 없으면 boto3 기본 체인(IAM Role 등)에 맡긴다."""
     import boto3
 
     kwargs: dict = {"region_name": settings.s3_region}

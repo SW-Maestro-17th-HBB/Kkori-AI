@@ -15,7 +15,7 @@ Worker는 Spring 백엔드가 발행한 이력서 분석 요청을 Redis Stream�
 
 ```
 [Spring] --XADD--> (resume.parse.requested) --XREADGROUP--> [Worker]
-                                                              │  S3/MinIO 다운로드
+                                                              │  S3 다운로드
                                                               │  AI 파이프라인
                                                               │  PostgreSQL/pgvector 직접 기록
 [Spring 전 인스턴스] <--SUBSCRIBE-- (resume.parse.status.changed) <--PUBLISH(JSON)-- (단계마다)
@@ -23,7 +23,7 @@ Worker는 Spring 백엔드가 발행한 이력서 분석 요청을 Redis Stream�
 ```
 
 - 스택: **FastStream(Redis 브로커) + uv(잠금 uv.lock) + Python 3.13**
-- 연동 인프라: Redis 스트림 1개(요청) + Pub/Sub 채널 1개(상태), PostgreSQL(pgvector), S3/MinIO,
+- 연동 인프라: Redis 스트림 1개(요청) + Pub/Sub 채널 1개(상태), PostgreSQL(pgvector), S3,
   AWS Bedrock(LLM·임베딩)
 - 불변 원칙: **모든 분석 요청은 반드시 `EMBEDDED` 또는 `FAILED`로 종결한다.**
 
@@ -39,7 +39,7 @@ Redis Stream 필드는 **전부 문자열**이다. 아래 인코딩 규칙이 Ja
 |---|---|---|---|
 | `resumeId` | Long | `str(long)` | |
 | `userId` | Long | `str(long)` | 상태 메시지에 **에코** (SSE 사용자 라우팅 근거) |
-| `bucket` | String | 그대로 | S3/MinIO 버킷. REINDEX에선 무시 |
+| `bucket` | String | 그대로 | S3 버킷. REINDEX에선 무시 |
 | `objectKey` | String | 그대로 | 객체 키. REINDEX에선 무시 |
 | `mode` | enum | `FULL` \| `REINDEX` | 5필드 전부 필수 — 모드 무관 |
 
@@ -187,10 +187,12 @@ DB의 `structured_data`(사용자 수정본)를 기준(source of truth)으로 �
 
 ---
 
-## 3. 복구·재개 (XAUTOCLAIM)
+## 3. 복구·재개 (XREADGROUP CLAIM)
 
 Worker가 XACK 전에 죽으면 메시지가 PEL(Pending Entries List)에 남는다. Worker는 ACK 없이 오래
-방치된(idle) 메시지를 **XAUTOCLAIM으로 회수**해, **DB 상태 기준 체크포인트에서 재개**한다.
+방치된(idle) 메시지를 **XREADGROUP CLAIM으로 회수**해, **DB 상태 기준 체크포인트에서 재개**한다.
+구독자는 하나다. XREADGROUP을 호출할 때마다 `claim_min_idle_ms`보다 오래 방치된 메시지를 먼저 가져오고,
+새 메시지도 함께 받는다(Redis 8.4+, FastStream `StreamSub(claim_min_idle_time=...)`).
 
 ### 3.1 상태별 재개 지점
 
@@ -210,11 +212,12 @@ Worker가 XACK 전에 죽으면 메시지가 PEL(Pending Entries List)에 남는
 ### 3.2 통일 진입 로직 (권장)
 파이프라인 **진입 지점 결정**은 신규·회수 메시지를 하나의 로직으로 통일한다 — 항상 DB 상태를 읽고 결정.
 단, **카운터 처리(§6)는 출처에 따라 다르다** — 신규(XREADGROUP `>`)는 새 런이라 `retry_count`를 0으로 리셋,
-회수(XAUTOCLAIM)는 같은 런의 재개라 리셋하지 않는다. 진입 라우팅은 통일하되 이 구분은 유지.
+회수(2번째 이상 전달)는 같은 런의 재개라 리셋하지 않는다. 진입 라우팅은 통일하되 이 구분은 유지.
+출처는 CLAIM이 메시지마다 함께 주는 이전 전달 횟수로 구분한다(0 = 신규).
 
 ### 3.3 동시·중복 처리 가드 (원자적 상태 전이)
 
-at-least-once + XAUTOCLAIM 회수는 **실제로 죽지 않은 원본과 회수본이 경합**할 수 있다("resumeId 멱등"만으론
+at-least-once + CLAIM 회수는 **실제로 죽지 않은 원본과 회수본이 경합**할 수 있다("resumeId 멱등"만으론
 이중 처리를 못 막음). 방어:
 
 - 각 단계 진입은 **원자적 상태 CAS**로 한다 — 예: `UPDATE ... SET parse_status='PARSING' WHERE resume_id=? AND parse_status='UPLOADED'`.
@@ -258,7 +261,7 @@ at-least-once + XAUTOCLAIM 회수는 **실제로 죽지 않은 원본과 회수�
 > Worker가 관리)다. 서로 파생되지 않는 별개 값이다.
 
 - 매 (내부) 시도 **즉시 DB 반영** (크래시 생존성·관측성).
-- **새 런(신규 메시지, XREADGROUP `>`) 시작 시 0으로 리셋** — 회수(XAUTOCLAIM) 재개는 같은 런이므로 리셋하지 않음.
+- **새 런(신규 메시지, XREADGROUP `>`) 시작 시 0으로 리셋** — 회수(CLAIM) 재개는 같은 런이므로 리셋하지 않음.
 - 의미 = **"현재 분석 런의 시도 횟수"**.
 - 서버는 재분석 시에도 **초기화하지 않는다** (리셋 시점·의미는 Worker 소관).
 
@@ -285,7 +288,7 @@ at-least-once + XAUTOCLAIM 회수는 **실제로 죽지 않은 원본과 회수�
   v4 만 제공되어 상위 호환인 v4 로 변경(2026-07-21) — **출력 차원을 1024 로 지정**해 `vector(1024)` 스키마는
   그대로 유지한다. 색인은 `input_type=search_document`, 질의 시 `search_query`로 **비대칭 임베딩** 사용(동일 지원).
 - 인증: 단일 IAM 원칙(백엔드 dev/prod S3 IAM Role 패턴과 일치).
-- **로컬 주의**: Bedrock은 로컬 에뮬레이터가 없다(MinIO=S3 로컬과 다름). 실제 제공자를 로컬에서 쓰면 실제 Bedrock
+- **로컬 주의**: Bedrock은 로컬 에뮬레이터가 없다(S3는 로컬에 RustFS가 있는 것과 다름). 실제 제공자를 로컬에서 쓰면 실제 Bedrock
   호출 → AWS 자격증명·리전 필요, 로컬에서도 과금.
 - **리전: us-east-1 (조직 정책상 강제)**(2026-07-21 실 호출 탐침으로 확정). 당초 서울(ap-northeast-2)을
   원했으나, 계정이 소속된 조직(SW마에스트로 발급)의 **SCP 가 Bedrock 호출을 us-east-1 에서만 허용**한다 —
@@ -315,7 +318,7 @@ at-least-once + XAUTOCLAIM 회수는 **실제로 죽지 않은 원본과 회수�
 | 항목 | 기본(예시) | 비고 |
 |---|---|---|
 | delivery count 임계 | 3 | §4 포기 규칙 |
-| idle time(회수 대상 판정) | 5~10분 | XAUTOCLAIM min-idle |
+| idle time(회수 대상 판정) | 5~10분 | XREADGROUP CLAIM min-idle-time (`claim_min_idle_ms`) |
 | 내부 재시도·백오프 | 지수 백오프 | 일시 오류(Bedrock throttle·네트워크)용 |
 | heartbeat | **MVP 생략 가능** | idle time + delivery count로 충분 |
 | Consumer Group / consumer | `kkori-worker` / 인스턴스 ID | 기동 시 `XGROUP CREATE ... MKSTREAM` 멱등 생성(스트림 선존 여부 무관) |
@@ -384,8 +387,7 @@ Content-Type: application/json
 - **스트림 소비는 `stream_max_workers`(기본 1)로 N건을 동시에 처리** — FastStream 구독자의
   `max_workers` 를 사용한다. 동시에 처리해도 ACK 는 메시지별로 핸들러가 끝난 뒤에 하므로,
   실패한 메시지가 PEL 에 남아 회수되는(§3) 설계는 그대로다. 같은 resumeId 가 동시에 처리되는
-  경우는 CAS 상태 전이(§3.3)가 걸러낸다. 회수 구독자는 지금처럼 한 건씩 처리한다
-  (복구는 드물어 동시에 처리할 이유가 없음)
+  경우는 CAS 상태 전이(§3.3)가 걸러낸다. 회수한 메시지도 같은 구독자가 받으므로 같은 동시 처리 수 안에서 처리한다
 - **N ≤ P 기동 검증** — `stream_max_workers` 가 `db_pool_max_size` 보다 크면 설정 오류로 기동이
   실패한다(fail-fast). 동시 작업이 풀보다 많으면 커넥션을 기다리느라 동시 처리 수가 조용히
   풀 크기로 깎이기 때문
@@ -441,3 +443,6 @@ Content-Type: application/json
 - 2026-09-05 Spring 2대에서 SSE 상태 알림이 절반쯤 유실(HBB1-332) — 상태 스트림을 Consumer Group 하나로
   읽어 메시지가 인스턴스에 나뉘고, SSE 연결이 없는 쪽 몫은 버려짐. 상태 발행을 Redis Pub/Sub(같은 이름의
   채널, JSON 페이로드)으로 전환해 전 인스턴스가 받게 함. 요청 스트림·소비 코드는 불변. → §1.2.
+- 2026-10-16 방치 메시지 회수를 XAUTOCLAIM 전용 구독자에서 **XREADGROUP CLAIM**(Redis 8.4+, FastStream 0.7.6+)으로
+  전환(HBB1-348). 새 메시지와 회수를 구독자 하나가 처리하고, 전달 횟수는 CLAIM 응답 값을 써서 XPENDING 조회를 없앴다.
+  `reclaim_poll_interval_ms`·`-reclaimer` 컨슈머 제거. Redis 8.4 미만이면 기동 시 실패한다. → §3, §9.

@@ -1,10 +1,10 @@
-"""회수(XAUTOCLAIM) 테스트 (§3) — 실제 Redis + 실제 DB.
+"""회수(XREADGROUP CLAIM) 테스트 (§3) — 실제 Redis(8.4+) + 실제 DB.
 
 시나리오: 다른 소비자("죽은 워커")가 메시지를 가져간 뒤 ACK 없이 사라짐
-→ 회수 구독자가 XAUTOCLAIM 으로 가져와 재처리·XACK 하는지 검증.
+→ 구독자가 XREADGROUP CLAIM 으로 가져와 재처리·XACK 하는지 검증.
 
-회수 구독자의 배관(폴링·커서)은 FastStream 몫이라, 테스트는 실제 XAUTOCLAIM 결과를
-`main.reclaim_one` 에 그대로 넘겨 처리 규칙만 확인한다.
+구독자의 배관(폴링)은 FastStream 몫이라, 테스트는 실제 XREADGROUP CLAIM 결과를
+`main.handle_entry` 에 그대로 넘겨 처리 규칙만 확인한다.
 """
 
 import asyncio
@@ -20,24 +20,11 @@ from src.ai import FakeEmbedder, FakeEnricher, FakeStructurer
 from src.contract import AnalysisStatus, ParseRequest, StatusChanged
 from src.storage.repository import count_chunks, get_parse_status
 from src.contract.structured_data import StructuredData
-from tests.conftest import DIM, requires_postgres, seed_resume
+from tests.conftest import DIM, requires_postgres, requires_redis_with_claim, seed_resume
 from tests.resume.test_pipeline import SD
 
 
-def _redis_available() -> bool:
-    import redis as sync_redis
-
-    try:
-        sync_redis.Redis(host="localhost", port=6379, socket_connect_timeout=2).ping()
-        return True
-    except Exception:
-        return False
-
-
-pytestmark = [
-    requires_postgres,
-    pytest.mark.skipif(not _redis_available(), reason="로컬 Redis(6379) 없음"),
-]
+pytestmark = [requires_postgres, requires_redis_with_claim]
 
 STREAM = ParseRequest.STREAM_KEY
 GROUP = "kkori-worker"
@@ -108,25 +95,24 @@ async def _pending_count(redis) -> int:
     return info["pending"]
 
 
-async def _reclaim_all(redis, limit: int = 10) -> int:
-    """구독자가 하는 일을 그대로 재현 — XAUTOCLAIM 으로 가져와 한 건씩 처리한다.
+async def _read_all(redis, limit: int = 10) -> int:
+    """구독자가 하는 일을 그대로 재현 — XREADGROUP CLAIM 으로 가져와 한 건씩 처리한다.
 
-    구독자는 폴링마다 한 건씩 받으므로(FastStream 이 count=1 고정), 여기서도 같은 단위로
-    `reclaim_one` 을 호출한다. 반환 = 처리 시도 건수.
+    방치 메시지와 새 메시지를 함께 받는다. 반환 = 처리 시도 건수.
     """
     processed = 0
     for _ in range(limit):
-        _cursor, messages, _deleted = await redis.xautoclaim(
-            name=STREAM,
-            groupname=GROUP,
-            consumername=main.settings.reclaim_consumer_name,
-            min_idle_time=0,  # 테스트는 즉시 회수
+        response = await redis.xreadgroup(
+            GROUP,
+            main.settings.resolved_consumer_name,
+            {STREAM: ">"},
             count=1,
+            claim_min_idle_time=0,  # 테스트는 즉시 회수
         )
-        if not messages:
+        if not response:
             break
-        message_id, fields = messages[0]
-        await main.reclaim_one(redis, message_id, fields)
+        (_stream, ((message_id, fields, _idle, prior_deliveries),)), = response
+        await main.handle_entry(redis, message_id, fields, prior_deliveries + 1)
         processed += 1
     return processed
 
@@ -137,7 +123,7 @@ async def test_방치메시지_회수해_재처리하고_ACK(conn, redis, wired)
     await _simulate_dead_worker(redis, rid)
     assert await _pending_count(redis) == 1  # 죽은 워커의 PEL 에 잔류
 
-    assert await _reclaim_all(redis) == 1
+    assert await _read_all(redis) == 1
 
     assert await get_parse_status(conn, rid) == "EMBEDDED"  # 체크포인트(EMBEDDING)부터 재개·완료
     assert await count_chunks(conn, rid) == 3
@@ -152,8 +138,8 @@ async def test_회수본도_포기규칙_임계도달시_FAILED_후_ACK(conn, re
     # 회수 반복을 시뮬레이션해 delivery count 를 2로 (XCLAIM 마다 +1)
     await redis.xclaim(STREAM, GROUP, "dead-worker2", min_idle_time=0, message_ids=[mid])
 
-    # 회수의 XAUTOCLAIM 이 3번째 전달 → 임계(3) 도달 → 재처리 없이 FAILED
-    assert await _reclaim_all(redis) == 1
+    # XREADGROUP CLAIM 이 3번째 전달 → 임계(3) 도달 → 재처리 없이 FAILED
+    assert await _read_all(redis) == 1
 
     assert await get_parse_status(conn, rid) == "FAILED"
     assert await count_chunks(conn, rid) == 0  # 재처리(청킹·임베딩) 안 함
@@ -166,7 +152,7 @@ async def test_회수본도_포기규칙_임계도달시_FAILED_후_ACK(conn, re
 
 @pytest.mark.asyncio
 async def test_처리실패시_ACK안함_PEL잔류(conn, redis, wired, monkeypatch):
-    """재처리 중 예외 → ACK 하지 않고 다음 폴링 대상으로 남긴다."""
+    """재처리 중 예외 → ACK 하지 않고 다음 회수 대상으로 남긴다."""
     rid = await seed_resume(conn, AnalysisStatus.EMBEDDING, SD)
     await _simulate_dead_worker(redis, rid)
 
@@ -174,14 +160,14 @@ async def test_처리실패시_ACK안함_PEL잔류(conn, redis, wired, monkeypat
         raise ConnectionError("일시 오류")
 
     monkeypatch.setattr(main, "process_request", broken)
-    await _reclaim_all(redis, limit=1)
+    await _read_all(redis, limit=1)
 
     assert await _pending_count(redis) == 1  # 잔류 → 다음 회수 대상
 
 
 @pytest.mark.asyncio
 async def test_방치메시지_없으면_아무일도_안함(conn, redis, wired):
-    assert await _reclaim_all(redis) == 0
+    assert await _read_all(redis) == 0
 
 
 @pytest.mark.asyncio
@@ -197,14 +183,14 @@ async def test_형식위반_메시지는_제거하고_나머지는_정상처리(
     await redis.xreadgroup(GROUP, "dead-worker", {STREAM: ">"}, count=10)
     assert await _pending_count(redis) == 2
 
-    assert await _reclaim_all(redis) == 2  # 형식 위반 1건 + 정상 1건
+    assert await _read_all(redis) == 2  # 형식 위반 1건 + 정상 1건
 
     assert await get_parse_status(conn, rid) == "EMBEDDED"  # 정상 메시지는 처리됨
     assert await _pending_count(redis) == 0  # 형식 위반도 ACK 로 제거 → 재회수 없음
 
 
 # --- 구독 배관 통합 검증 ---------------------------------------------------
-# 위 테스트들은 reclaim_one 을 직접 호출하므로 구독자 배선(StreamSub 라우팅·AckPolicy·
+# 위 테스트들은 handle_entry 를 직접 호출하므로 구독자 배선(StreamSub 라우팅·AckPolicy·
 # 커넥션 주입)은 타지 않는다. 실제로 그 사각지대에서 주입 타입 오류가 났었기에,
 # 구독자를 띄워서 도는지 확인하는 테스트를 따로 둔다.
 
@@ -230,44 +216,40 @@ async def _run_subscriber(sub, seconds: float) -> None:
             await main.broker.stop()
 
 
-def _subscribers():
-    reclaim = [s for s in main.broker._subscribers if s.stream_sub.min_idle_time is not None]
-    fresh = [s for s in main.broker._subscribers if s.stream_sub.min_idle_time is None]
-    assert len(reclaim) == 1 and len(fresh) == 1, "구독자는 회수용·새 메시지용 하나씩이어야 한다"
-    return reclaim[0], fresh[0]
+def _subscriber(monkeypatch):
+    """스트림 구독자는 하나 — 테스트에서는 방치 메시지를 즉시 회수하도록 바꾼다."""
+    subs = list(main.broker._subscribers)
+    assert len(subs) == 1, "구독자는 새 메시지와 회수를 함께 처리하는 하나여야 한다"
+    sub = subs[0]
+    assert sub.stream_sub.claim_min_idle_time == main.settings.claim_min_idle_ms
+    monkeypatch.setattr(sub, "claim_min_idle_time", 0)
+    return sub
 
 
 @pytest.mark.asyncio
-async def test_구독자_배선_회수구독자가_방치메시지를_제거한다(redis, monkeypatch):
-    """StreamSub(min_idle_time) 라우팅·AckPolicy.MANUAL·커넥션 주입이 실제로 맞물리는지.
+async def test_구독자_배선_방치메시지를_회수해_제거한다(redis, monkeypatch):
+    """StreamSub(claim_min_idle_time) 라우팅·AckPolicy.MANUAL·커넥션 주입이 실제로 맞물리는지.
 
     형식 위반 메시지를 쓰는 이유는 DB·AI 자원 없이도 끝까지 도달하기 때문이다
     (decode 실패 → 로그 → ACK).
     """
-    reclaim_sub, _ = _subscribers()
-    monkeypatch.setattr(reclaim_sub, "min_idle_time", 0)  # 즉시 회수 대상으로
+    sub = _subscriber(monkeypatch)
 
     await redis.xadd(STREAM, {"resumeId": "1", "userId": "1", "bucket": "b",
                               "objectKey": "k", "mode": "WRONG"})
     await redis.xreadgroup(GROUP, "dead-worker", {STREAM: ">"}, count=10)
     assert await _pending_count(redis) == 1
 
-    await _run_subscriber(reclaim_sub, 2.0)
+    await _run_subscriber(sub, 2.0)
 
     assert await _pending_count(redis) == 0  # 구독자가 회수해 제거
-    consumers = {c["name"].decode() for c in await redis.xinfo_consumers(STREAM, GROUP)}
-    assert main.settings.reclaim_consumer_name in consumers  # 회수 전용 컨슈머가 소유권을 가져감
 
 
 @pytest.mark.asyncio
-async def test_구독자_배선_회수구독자는_새메시지를_읽지_않는다(redis, monkeypatch):
-    """min_idle_time 을 준 구독자는 XAUTOCLAIM 만 돈다 — 새 메시지는 PEL 에 없어 못 읽는다.
-
-    FastStream 공식 문서에는 한 구독자가 둘 다 한다는 예시가 있으나 구현과 어긋난다
-    (프로젝트 이슈 #2848·#2927). 구독자를 합치면 새 메시지가 조용히 안 읽히므로 고정한다.
-    """
-    reclaim_sub, fresh_sub = _subscribers()
-    monkeypatch.setattr(reclaim_sub, "min_idle_time", 0)
+async def test_구독자_배선_새메시지도_같은_구독자가_읽는다(redis, monkeypatch):
+    """회수 전용 구독자(XAUTOCLAIM)는 새 메시지를 못 읽어 구독자를 둘로 나눴었다.
+    CLAIM 으로 합친 구독자가 새 메시지도 읽는지 고정한다."""
+    sub = _subscriber(monkeypatch)
 
     await redis.xadd(STREAM, {"resumeId": "1", "userId": "1", "bucket": "b",
                               "objectKey": "k", "mode": "WRONG"})
@@ -276,11 +258,9 @@ async def test_구독자_배선_회수구독자는_새메시지를_읽지_않는
         return (await redis.xinfo_groups(STREAM))[0]["last-delivered-id"].decode()
 
     assert await last_delivered() == "0-0"
-    await _run_subscriber(reclaim_sub, 1.5)
-    assert await last_delivered() == "0-0", "회수 구독자가 새 메시지를 읽으면 안 된다"
-
-    await _run_subscriber(fresh_sub, 1.5)
-    assert await last_delivered() != "0-0", "새 메시지 구독자는 읽어야 한다"
+    await _run_subscriber(sub, 1.5)
+    assert await last_delivered() != "0-0", "새 메시지를 읽어야 한다"
+    assert await _pending_count(redis) == 0  # 형식 위반이라 읽고 바로 제거
 
 
 @pytest.mark.asyncio
@@ -290,8 +270,7 @@ async def test_구독자_배선_처리실패시_ACK안하고_PEL에_남는다(co
     ack_policy 를 빼면 기본값(REJECT_ON_ERROR)으로 돌아가는데, 이 테스트가 그 회귀를 잡는다.
     위 배선 테스트들은 성공 경로만 보므로 실패 경로를 따로 둔다.
     """
-    reclaim_sub, _ = _subscribers()
-    monkeypatch.setattr(reclaim_sub, "min_idle_time", 0)
+    sub = _subscriber(monkeypatch)
 
     rid = await seed_resume(conn, AnalysisStatus.EMBEDDING, SD)
     await _simulate_dead_worker(redis, rid)
@@ -299,14 +278,20 @@ async def test_구독자_배선_처리실패시_ACK안하고_PEL에_남는다(co
 
     # 구독자가 아예 안 돌아도 PEL 은 1로 남으므로, 실패 경로를 정말 탔는지 표시를 남긴다
     called = asyncio.Event()
+    received = {}
 
     async def broken(*args, **kwargs):
+        if not called.is_set():  # 테스트는 idle 기준이 0 이라 실패한 메시지를 계속 다시 가져온다 — 첫 전달만 본다
+            received.update(kwargs)
         called.set()
         raise ConnectionError("일시 오류")
 
     monkeypatch.setattr(main, "process_request", broken)
 
-    await _run_subscriber(reclaim_sub, 2.0)
+    await _run_subscriber(sub, 2.0)
 
-    assert called.is_set(), "회수 구독자가 메시지를 처리 함수까지 전달해야 한다"
+    assert called.is_set(), "구독자가 메시지를 처리 함수까지 전달해야 한다"
+    # 죽은 워커가 1번 받았으니 이번이 2번째 전달 — XPENDING 의 times_delivered 와 같은 값
+    assert received["delivery_count"] == 2
+    assert received["is_reclaimed"] is True
     assert await _pending_count(redis) == 1, "처리 실패 메시지가 ACK 되면 안 된다"

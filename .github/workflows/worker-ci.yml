@@ -35,7 +35,7 @@ jobs:
           --health-timeout 3s
           --health-retries 10
       redis:
-        image: redis:7-alpine
+        image: redis:8-alpine
         ports:
           - 6379:6379
         options: >-
@@ -60,12 +60,13 @@ jobs:
         working-directory: worker
         run: uv sync --locked
 
-      # MinIO 는 시작 명령(server /data)이 필요해 services 로 못 띄운다 → 직접 실행 + 버킷 생성
-      - name: Start MinIO and create bucket
+      # S3 호환 저장소 — RustFS (MinIO 대체). MinIO 커뮤니티 이미지가 2026-09 레지스트리에서 삭제돼
+      # 백엔드(Kkori-Backend #167)와 같은 이미지로 교체했다. 버킷을 만들어야 해서 services 대신 직접 실행한다
+      - name: Start RustFS and create bucket
         run: |
-          docker run -d --name minio -p 9000:9000 \
-            -e MINIO_ROOT_USER=kkori -e MINIO_ROOT_PASSWORD=kkori1234 \
-            minio/minio server /data
+          docker run -d --name rustfs -p 9000:9000 \
+            -e RUSTFS_ACCESS_KEY=kkori -e RUSTFS_SECRET_KEY=kkori1234 \
+            rustfs/rustfs:1.0.0
           uv run --project worker python - <<'EOF'
           import time
           import boto3
@@ -89,7 +90,7 @@ jobs:
               except EndpointConnectionError:
                   time.sleep(1)
           else:
-              raise SystemExit("MinIO 기동 실패")
+              raise SystemExit("RustFS 기동 실패")
           EOF
 
       - name: Run tests

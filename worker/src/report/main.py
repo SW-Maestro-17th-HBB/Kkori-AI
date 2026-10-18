@@ -8,9 +8,8 @@
 - `report.audio.analysis.requested` → 음성 분석(2단계), 전달력 산출
 상태 전이마다 `report.status.changed` 를 발행한다.
 
-스트림마다 구독자가 둘이다 — 새 메시지용과 방치 메시지 회수용. `StreamSub` 에
-`min_idle_time` 을 주면 XREADGROUP 대신 XAUTOCLAIM 을 도는 회수 전용 모드가 되어 갓
-들어온 메시지를 못 읽으므로(이력서에서 실측), 한 구독자가 둘 다 할 수 없어 나눈다.
+스트림마다 구독자는 하나다 — `StreamSub(claim_min_idle_time=...)` 로 XREADGROUP CLAIM
+(Redis 8.4+)을 써서, 읽을 때마다 방치된 메시지를 먼저 가져오고 새 메시지도 함께 받는다.
 
 유예 완성(음성이 늦으면 전달력 없이 완성)은 구독자가 아니라 주기 작업이다 — 음성 요청이
 아예 오지 않는 경우(녹음 실패·발행 유실)를 잡아야 하므로 메시지에 기대 수 없다.
@@ -33,7 +32,7 @@ from src.analysis.extraction import build_s3_client
 from src.config import Settings, get_settings
 from src.contract import AudioAnalysisRequested, ReportGenerationRequested, ReportStatus
 from src.contract.fields import decode_fields
-from src.messaging.pel import get_delivery_count
+from src.messaging.claim import ensure_claim_supported, entry_of
 from src.report.audio_pipeline import process_audio_request
 from src.report.evaluator import Evaluator, build_evaluator
 from src.report.pipeline import process_generation_request
@@ -123,6 +122,7 @@ async def _process_audio(
 
 @app.on_startup
 async def startup() -> None:
+    await ensure_claim_supported(settings.redis_url)
     schema_conn = await connect(settings)
     try:
         await ensure_schema(schema_conn)  # 워커 소유 report_generation_jobs 멱등 생성
@@ -168,72 +168,22 @@ async def complete_overdue_once(redis: Redis) -> int:
     return len(rows)
 
 
-# ---------------------------------------------------------------- 새 메시지 구독자
+# ---------------------------------------------------------------- 구독자
 
-async def _delivery_count_of(redis: Redis, stream: str, msg: RedisStreamMessage) -> int:
-    """포기 규칙 판단 근거 — 이 메시지의 전달 횟수 (message id 없으면 1로 간주)."""
-    message_ids = msg.raw_message.get("message_ids") or []
-    if not message_ids:
-        return 1
-    return await get_delivery_count(
-        redis, stream, settings.report_consumer_group, message_ids[0]
-    )
-
-
-@broker.subscriber(
-    stream=StreamSub(
-        GENERATION_STREAM,
-        group=settings.report_consumer_group,
-        consumer=settings.resolved_consumer_name,
-    ),
-    # max_workers 를 주면 같은 스트림의 메시지 여러 건을 동시에 처리할 수 있다
-    # (정합성은 CAS·유니크 제약이 이미 보장). 기본은 순차 — 메시지 대기가 실측에서
-    # 문제로 나타나면 Bedrock 속도 한도를 확인한 뒤 켠다.
-)
-async def handle_generation_requested(
-    request: ReportGenerationRequested, msg: RedisStreamMessage
-) -> None:
-    """새 생성 요청 처리 진입점.
-
-    정상 반환 = ACK(종결·스킵·양보·포기), 예외 = PEL 잔류 → 회수 대상.
-    형식 위반 메시지는 여기 도달 전에 decode 에서 실패해 PEL 에 남고,
-    회수 경로가 로그 후 제거한다.
-    """
-    delivery_count = await _delivery_count_of(broker._connection, GENERATION_STREAM, msg)
-    await _process(request, delivery_count, broker._connection)
-
-
-@broker.subscriber(
-    stream=StreamSub(
-        AUDIO_STREAM,
-        group=settings.report_consumer_group,
-        consumer=settings.resolved_consumer_name,
-    ),
-)
-async def handle_audio_requested(
-    request: AudioAnalysisRequested, msg: RedisStreamMessage
-) -> None:
-    """새 음성 분석 요청 처리 진입점 — 규칙은 생성 요청과 같다(정상 반환 = ACK)."""
-    delivery_count = await _delivery_count_of(broker._connection, AUDIO_STREAM, msg)
-    await _process_audio(request, delivery_count, broker._connection)
-
-
-# ---------------------------------------------------------------- 회수 구독자
-
-async def _reclaim(
+async def _handle_entry(
     redis: Redis,
     message_id: bytes,
     fields: dict,
     *,
     stream: str,
     decode: Callable[[dict], object],
-    run: Callable[[object, int], Awaitable[None]],
+    run: Callable[[object], Awaitable[None]],
 ) -> None:
-    """회수된 메시지 한 건 처리 — 계약 위반은 제거하고, 처리 실패는 PEL 에 남긴다.
+    """메시지 한 건 처리 — 계약 위반은 제거하고, 처리 실패는 PEL 에 남긴다.
 
-    ACK 을 직접 가르므로 구독자는 `AckPolicy.MANUAL` 이다. 구독 배관에서 떼어놓아
-    실제 XAUTOCLAIM 결과를 그대로 넘겨 테스트할 수 있게 한다. 두 스트림이 규칙을
-    공유하므로 계약 decode 와 처리 함수만 인자로 받는다.
+    새 메시지와 회수한 메시지가 같은 경로를 탄다. ACK 을 직접 가르므로 구독자는
+    `AckPolicy.MANUAL` 이다. 구독 배관에서 떼어놓아 실제 XREADGROUP 결과를 그대로 넘겨
+    테스트할 수 있게 한다. 두 스트림이 규칙을 공유하므로 계약 decode 와 처리 함수만 인자로 받는다.
     """
 
     async def ack() -> None:
@@ -243,75 +193,71 @@ async def _reclaim(
         request = decode(decode_fields(fields))
     except Exception:
         # 형식이 틀린 메시지는 재처리도, FAILED 기록도 불가능하다(sessionId 를 못 읽음).
-        # ACK 하지 않으면 폴링마다 재회수가 반복되므로, 원본 필드를 로그에 남기고 제거한다.
+        # ACK 하지 않으면 회수가 계속 반복되므로, 원본 필드를 로그에 남기고 제거한다.
         logger.exception("형식 위반 메시지 제거 (stream=%s, id=%s, fields=%r)", stream, message_id, fields)
         await ack()
         return
 
     try:
-        delivery_count = await get_delivery_count(
-            redis, stream, settings.report_consumer_group, message_id
-        )
-        await run(request, delivery_count)
+        await run(request)
         await ack()
     except Exception:
-        # ACK 하지 않아 PEL 에 남고 다음 폴링의 회수 대상이 된다.
-        logger.exception("회수 재처리 실패 (stream=%s, sessionId=%s)", stream, request.sessionId)
+        # ACK 하지 않아 PEL 에 남고, claim_min_idle_ms 가 지나면 다시 회수된다.
+        logger.exception("처리 실패 (stream=%s, sessionId=%s)", stream, request.sessionId)
 
 
-async def reclaim_one(redis: Redis, message_id: bytes, fields: dict) -> None:
-    """생성 요청 회수 1건."""
+async def handle_generation_entry(
+    redis: Redis, message_id: bytes, fields: dict, delivery_count: int
+) -> None:
+    """생성 요청 1건 — 2번째 이상 전달이면 같은 런의 재개(`is_reclaimed`)로 처리한다."""
 
-    async def run(request, delivery_count: int) -> None:
-        await _process(request, delivery_count, redis, is_reclaimed=True)
+    async def run(request) -> None:
+        await _process(request, delivery_count, redis, is_reclaimed=delivery_count > 1)
 
-    await _reclaim(
+    await _handle_entry(
         redis, message_id, fields,
         stream=GENERATION_STREAM, decode=ReportGenerationRequested.decode, run=run,
     )
 
 
-async def reclaim_audio_one(redis: Redis, message_id: bytes, fields: dict) -> None:
-    """음성 분석 요청 회수 1건 — 분석은 결정적이라 재개 구분 없이 같은 흐름을 다시 탄다."""
+async def handle_audio_entry(
+    redis: Redis, message_id: bytes, fields: dict, delivery_count: int
+) -> None:
+    """음성 분석 요청 1건 — 분석은 결정적이라 재개 구분 없이 같은 흐름을 다시 탄다."""
 
-    async def run(request, delivery_count: int) -> None:
+    async def run(request) -> None:
         await _process_audio(request, delivery_count, redis)
 
-    await _reclaim(
+    await _handle_entry(
         redis, message_id, fields,
         stream=AUDIO_STREAM, decode=AudioAnalysisRequested.decode, run=run,
     )
 
 
-def _reclaim_sub(stream: str) -> StreamSub:
+def _stream_sub(stream: str) -> StreamSub:
     return StreamSub(
         stream,
         group=settings.report_consumer_group,
-        consumer=settings.reclaim_consumer_name,
-        # min_idle_time 을 주면 XREADGROUP 대신 XAUTOCLAIM 을 도는 회수 전용 구독자가 된다.
-        min_idle_time=settings.claim_min_idle_ms,
-        polling_interval=settings.reclaim_poll_interval_ms,
+        consumer=settings.resolved_consumer_name,
+        # XREADGROUP CLAIM — 읽을 때마다 이 시간 넘게 방치된 메시지를 먼저 가져온다.
+        claim_min_idle_time=settings.claim_min_idle_ms,
     )
 
 
-def _message_id_of(msg: RedisStreamMessage) -> bytes | None:
-    message_ids = msg.raw_message.get("message_ids") or []
-    return message_ids[0] if message_ids else None  # 회수 경로는 항상 한 건씩 오지만 방어적으로
-
-
-@broker.subscriber(stream=_reclaim_sub(GENERATION_STREAM), ack_policy=AckPolicy.MANUAL)
-async def handle_reclaimed(msg: RedisStreamMessage, redis: InjectedRedis) -> None:
-    """생성 요청 회수 구독자 — 배선만 하고 처리는 `reclaim_one` 이 한다.
+# max_workers 를 주면 같은 스트림의 메시지 여러 건을 동시에 처리할 수 있다
+# (정합성은 CAS·유니크 제약이 이미 보장). 기본은 순차 — 메시지 대기가 실측에서
+# 문제로 나타나면 Bedrock 속도 한도를 확인한 뒤 켠다.
+@broker.subscriber(stream=_stream_sub(GENERATION_STREAM), ack_policy=AckPolicy.MANUAL)
+async def handle_generation_requested(msg: RedisStreamMessage, redis: InjectedRedis) -> None:
+    """생성 요청 구독자 — 배선만 하고 처리는 `handle_generation_entry` 가 한다.
 
     `redis` 는 FastStream 이 Context 로 넣어주는 커넥션이다. `redis.asyncio.Redis` 를
     그대로 힌트로 쓰면 주입되지 않고 검증 오류가 난다.
     """
-    if (message_id := _message_id_of(msg)) is not None:
-        await reclaim_one(redis, message_id, msg.raw_message["data"])
+    await handle_generation_entry(redis, *entry_of(msg))
 
 
-@broker.subscriber(stream=_reclaim_sub(AUDIO_STREAM), ack_policy=AckPolicy.MANUAL)
-async def handle_audio_reclaimed(msg: RedisStreamMessage, redis: InjectedRedis) -> None:
-    """음성 분석 요청 회수 구독자."""
-    if (message_id := _message_id_of(msg)) is not None:
-        await reclaim_audio_one(redis, message_id, msg.raw_message["data"])
+@broker.subscriber(stream=_stream_sub(AUDIO_STREAM), ack_policy=AckPolicy.MANUAL)
+async def handle_audio_requested(msg: RedisStreamMessage, redis: InjectedRedis) -> None:
+    """음성 분석 요청 구독자."""
+    await handle_audio_entry(redis, *entry_of(msg))

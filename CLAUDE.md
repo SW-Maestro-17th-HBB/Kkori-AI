@@ -25,7 +25,7 @@ docker build -f worker/Dockerfile -t kkori-worker .
 ```
 
 - 에이전트 실행에는 `agent/.env`에 LiveKit Cloud 자격증명(STT·TTS·룸)과 AWS 자격증명(Bedrock LLM) 필요 (`agent/.env.example` 참조, Git 비추적)
-- agent는 `agent/tests/` 운용 중 — 단위 테스트(파싱·프롬프트 조립·선택 폴백)는 항상 실행, LLM 스모크 테스트(유료 실호출)는 `KKORI_LIVE_LLM=1` + 프로바이더 자격증명(bedrock 기본 → AWS 키, inference → LiveKit 키)이 있을 때만 실행(기본 skip — CI 포함). worker는 `worker/tests/` 운용 중 — 일부 테스트는 로컬 인프라(Postgres/Redis/MinIO) 없으면 skip, CI에서는 서비스 컨테이너로 전부 실행
+- agent는 `agent/tests/` 운용 중 — 단위 테스트(파싱·프롬프트 조립·선택 폴백)는 항상 실행, LLM 스모크 테스트(유료 실호출)는 `KKORI_LIVE_LLM=1` + 프로바이더 자격증명(bedrock 기본 → AWS 키, inference → LiveKit 키)이 있을 때만 실행(기본 skip — CI 포함). worker는 `worker/tests/` 운용 중 — 일부 테스트는 로컬 인프라(Postgres/Redis/RustFS) 없으면 skip, CI에서는 서비스 컨테이너로 전부 실행
 
 ## 작업 규칙
 
@@ -35,10 +35,10 @@ docker build -f worker/Dockerfile -t kkori-worker .
 
 ## 기술적 결정사항
 
-- **worker 는 파이프라인(도메인)별 독립 프로세스** — 한 코드베이스(worker/)지만 이력서(`src.main:app`)와 리포트(`src.report.main:app`)를 별개 앱으로 실행한다. 리포트는 LLM 의존이 크고 배포가 잦아 장애·배포를 격리하기 위함. 리포트 코드는 `src/report/` 도메인 패키지에 모으고, 공유는 `contract/`·`ai/`·`config.py`·`messaging/pel.py` 같은 라이브러리 계층뿐. 발행 모듈은 계약이 도메인 소유라 각자 두지만, 계약에 안 묶이는 PEL 조회는 공용이다
+- **worker 는 파이프라인(도메인)별 독립 프로세스** — 한 코드베이스(worker/)지만 이력서(`src.main:app`)와 리포트(`src.report.main:app`)를 별개 앱으로 실행한다. 리포트는 LLM 의존이 크고 배포가 잦아 장애·배포를 격리하기 위함. 리포트 코드는 `src/report/` 도메인 패키지에 모으고, 공유는 `contract/`·`ai/`·`config.py`·`messaging/claim.py` 같은 라이브러리 계층뿐. 발행 모듈은 계약이 도메인 소유라 각자 두지만, 계약에 안 묶이는 CLAIM 처리(버전 확인·전달 횟수 읽기)는 공용이다
 - **이력서 워커는 AsgiFastStream(구독자 + HTTP 단일 프로세스)** — 동기 디스패치 실험(HBB1-327, worker PRD §11)용 `POST /internal/analyses/resume` 를 스트림 소비와 같은 프로세스로 서빙한다(FastStream 0.7 내장 ASGI + uvicorn, 기본 127.0.0.1:8000 = Spring 로컬 기본 base URL, Docker 는 `--host 0.0.0.0` + EXPOSE 8000). FastAPI 미도입 — 고정 경로 1개에 프레임워크 추가는 과함. 스트림 경로와 같은 배선(`_process`)을 태워 상태 이벤트까지 작업량이 동일하고, 2xx 는 처리 후 상태 재조회로 EMBEDDED 일 때만. fake 지연은 `KKORI_WORKER_FAKE_DELAY_SECONDS`(분석 1건당 총 ≈N, `time.sleep` — to_thread 경유라 루프 안 막힘). DB 접근은 HTTP·스트림 두 경로가 공유하는 커넥션 풀(`db_pool_max_size`, 기본 10 — 부하 리허설에서 요청당 새 연결이 too many clients 를 일으켜 도입)로, 워커 PG 연결 총량 = 풀 크기. 대기 초과 시 HTTP 는 503, 스트림은 PEL 회수. 스트림 소비는 `stream_max_workers`(기본 1 = 순차)로 동시 N건 처리 가능하며 풀 크기 초과 설정은 기동 실패. 리포트 워커(`src.report.main:app`)는 FastStream 유지. 실험 종료 후 제거 가능
-- **리포트 워커의 음성 분석(2단계)은 Silero VAD(ONNX) + 결정적 산식** — `report.audio.analysis.requested` 를 같은 프로세스의 추가 구독자(+회수 구독자)로 소비해 `REPORTS.delivery_score` 를 산출한다. VAD 는 Silero v6.2.1 ONNX 모델 파일(`worker/src/report/models/`, MIT)을 onnxruntime 으로 돌린다 — 공식 패키지는 torch 를 끌고 와서 쓰지 않는다. 디코딩은 soundfile(libsndfile 번들 Opus, ffmpeg 불필요). 말 속도는 대본 음절 수 ÷ 오디오 발성 시간, 침묵은 발화 사이 10초 이하 공백만(파일에 지원자 음성만 있어 면접관 차례를 공백 길이로 구분). 임계값은 전부 잠정(실제 녹음으로 보정 전) — `worker/docs/requirements/report-evaluation/delivery-score.md`. 유예 완성(텍스트 완료 후 `audio_grace_seconds` 안에 음성이 없으면 전달력 없이 완성)은 `audio_analysis_enabled` 가 켜진 경우에만 도는 주기 작업
-- **방치 메시지 회수는 도메인마다 전용 구독자** — `StreamSub` 에 `min_idle_time` 을 주면 XREADGROUP 대신 XAUTOCLAIM 을 도는 회수 전용 모드가 되어 한 구독자가 새 메시지와 회수를 겸할 수 없다(실측). 그래서 각 워커가 구독자 둘을 등록하고, 회수 쪽은 `ack_policy=MANUAL` 로 ACK 을 직접 가른다 — 형식 위반은 제거(ACK)하고 처리 실패는 PEL 에 남겨야 해서. 폴링 간격(`reclaim_poll_interval_ms`)이 복구 지연을 정한다: 최악 = `claim_min_idle_ms` + 폴링 간격
+- **리포트 워커의 음성 분석(2단계)은 Silero VAD(ONNX) + 결정적 산식** — `report.audio.analysis.requested` 를 같은 프로세스의 추가 구독자로 소비해 `REPORTS.delivery_score` 를 산출한다. VAD 는 Silero v6.2.1 ONNX 모델 파일(`worker/src/report/models/`, MIT)을 onnxruntime 으로 돌린다 — 공식 패키지는 torch 를 끌고 와서 쓰지 않는다. 디코딩은 soundfile(libsndfile 번들 Opus, ffmpeg 불필요). 말 속도는 대본 음절 수 ÷ 오디오 발성 시간, 침묵은 발화 사이 10초 이하 공백만(파일에 지원자 음성만 있어 면접관 차례를 공백 길이로 구분). 임계값은 전부 잠정(실제 녹음으로 보정 전) — `worker/docs/requirements/report-evaluation/delivery-score.md`. 유예 완성(텍스트 완료 후 `audio_grace_seconds` 안에 음성이 없으면 전달력 없이 완성)은 `audio_analysis_enabled` 가 켜진 경우에만 도는 주기 작업
+- **방치 메시지 회수는 XREADGROUP CLAIM (Redis 8.4+)** — 스트림마다 구독자 하나에 `StreamSub(claim_min_idle_time=settings.claim_min_idle_ms)` 를 주면, 읽을 때마다 방치된 메시지를 먼저 가져오고 새 메시지도 함께 받는다. 전달 횟수는 CLAIM 응답에 같이 오는 값(`messaging.claim.entry_of`)을 쓰고, 2번째 이상 전달이면 회수(`is_reclaimed`)로 본다. 구독자는 `ack_policy=MANUAL` 로 ACK 을 직접 가른다 — 형식 위반은 제거(ACK)하고 처리 실패는 PEL 에 남겨야 해서. `min_idle_time`(XAUTOCLAIM 모드)은 새 메시지를 못 읽으므로 쓰지 않는다. Redis 8.4 미만이면 CLAIM 이 거부되는데 AsgiFastStream(이력서 워커)은 프로세스가 살아남으므로, 두 워커 모두 `on_startup` 에서 버전을 확인해 기동을 실패시킨다(`ensure_claim_supported`). 로컬(백엔드 compose)·CI 의 Redis 도 8.x
 - **서비스별 독립 uv 프로젝트 (워크스페이스 아님)** — 두 서비스는 상호 import 없이 독립 배포되므로 단일 락파일 워크스페이스 대신 서비스마다 자체 pyproject.toml·uv.lock을 둔다(서비스 간 잠금 결합 제거, 팀원 간 작업 충돌 방지). 각 Dockerfile이 자기 락파일로 `uv sync --locked --no-dev` 후 소스 복사. pyproject에 build-system 없이 `[tool.uv] package = false`로 의존성만 설치(현행 `src/` 레이아웃 유지)
 - **livekit-agents + LiveKit Inference(STT·TTS) + Bedrock(LLM)** — STT·TTS·VAD는 LiveKit Cloud Inference, LLM은 `livekit-plugins-aws`(`aws.LLM`, Converse Stream)로 Bedrock Claude를 사용(worker와 동일 AWS 계정). 리전은 서울 + `global.` 크로스리전 프로파일(2026-07-31 실호출 탐침 — 서울은 global만 제공, 도쿄 jp.는 SCP 명시 거부, 지연은 us-east-1과 동급). 모델 구성은 `agent/src/config.py` 상수로, 교체 시 상수만 변경. 전환기 한정 `KKORI_LLM_PROVIDER=inference` 토글로 구 LiveKit Inference LLM 경로 병행(안정화 후 토글·inference LLM 경로 제거 예정, 팩토리는 `src/llm_factory.py`)
 - **Orchestrator 구조화 출력은 강제 tool 호출** — `response_format`은 프로바이더 공통 지원이 아니어서(Bedrock Converse 미지원), 판단 스키마를 tool 파라미터로 강제하고(`tool_choice`로 해당 tool 지정) 인자 JSON을 파싱한다. 실패는 기존과 동일하게 폴백 수렴
@@ -54,7 +54,7 @@ docker build -f worker/Dockerfile -t kkori-worker .
 - PR 제목은 `<타입>: [HBB1-<지라번호>] <요약>` 형식 (예: `feat: [HBB1-263] livekit-agents 및 기본 플러그인 연동`) — 지라 키가 제목에 있으면 GitHub for Atlassian이 티켓에 자동 연결
 - PR 본문은 템플릿(관련 이슈 / 실행 검증 / PRD 경로 / 완료 조건) 준수 — 완료 조건은 PRD에서 발췌한 검증 가능한 문장으로 작성하고, 체크는 검증된 후에만
 - CodeRabbit이 develop 대상 PR을 자동 리뷰 (draft는 제외 — ready 전환 시점에 리뷰 시작, 이후 커밋은 증분 리뷰). 재리뷰가 필요하면 `@coderabbitai review` 코멘트
-- CI(GitHub Actions)는 agent/worker 경로별 워크플로우가 main/develop 대상 push·PR에서 실행 — agent는 `uv sync --locked` + import 검증 + pytest, worker는 `uv sync --locked` + 서비스 컨테이너(Postgres/Redis/MinIO) 기동 후 pytest 전체 실행
+- CI(GitHub Actions)는 agent/worker 경로별 워크플로우가 main/develop 대상 push·PR에서 실행 — agent는 `uv sync --locked` + import 검증 + pytest, worker는 `uv sync --locked` + 서비스 컨테이너(Postgres/Redis/RustFS) 기동 후 pytest 전체 실행
 
 ## 문서 참조 맵
 
